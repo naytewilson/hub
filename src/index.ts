@@ -328,18 +328,7 @@ async function main(): Promise<void> {
     logger.info(`server started, available at: ${appUrl}`);
   });
 
-  const stop = async () => {
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => {
-        if (error !== undefined) {
-          reject(error);
-          return;
-        }
-        resolve();
-      });
-    });
-    await build.stopProductionRuntime();
-  };
+  const stop = () => stopProductionServer(server, () => build.stopProductionRuntime());
   const stopAfterSignal = () => {
     void shutdownProductionServer(stop)
       .then((clean) => {
@@ -350,6 +339,28 @@ async function main(): Promise<void> {
   };
   process.once("SIGTERM", stopAfterSignal);
   process.once("SIGINT", stopAfterSignal);
+}
+
+interface ProductionServer {
+  close(callback: (error?: Error) => void): unknown;
+  closeIdleConnections?(): void;
+}
+
+export function stopProductionServer(
+  server: ProductionServer,
+  stopRuntime: () => Promise<void>,
+): Promise<void> {
+  const listenerClosed = new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error !== undefined) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+  server.closeIdleConnections?.();
+  return Promise.all([listenerClosed, stopRuntime()]).then(() => undefined);
 }
 
 export async function shutdownProductionServer(
