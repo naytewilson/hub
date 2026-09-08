@@ -1,7 +1,5 @@
 import type { ErrorObject } from "ajv";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { createMcpHandler, Server } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { verifyAgentExecutionCompletionToken } from "../agent-executions/completion-token.js";
 import type { AgentExecutionRecord, Database } from "../db/types.js";
@@ -17,6 +15,8 @@ import {
 } from "./outputs.js";
 
 type JsonSchema = OutputToolSchema;
+
+export const MCP_PROTOCOL_VERSION = "2026-07-28" as const;
 
 export interface ExecutionCapabilityServer {
   handle(request: Request, executionId: string): Promise<Response>;
@@ -65,20 +65,29 @@ export function createExecutionCapabilityServer(
         );
       }
 
-      const server = createMcpServer(options, execution, token!, materializedOutputs);
-      const transport = new WebStandardStreamableHTTPServerTransport({
-        // Omitting sessionIdGenerator is the SDK's stateless-mode setting.
-        enableJsonResponse: true,
-        enableDnsRebindingProtection: false,
-      });
+      // MCP 2026-07-28 is stateless at the protocol layer. createMcpHandler builds a
+      // fresh server for every request. legacy:"reject" is deliberate: this endpoint
+      // must never fall back to the 2025 initialize/session protocol or Mcp-Session-Id.
+      const handler = createMcpHandler(
+        () => createMcpServer(options, execution, token!, materializedOutputs),
+        {
+          legacy: "reject",
+          responseMode: "json",
+          onerror(error) {
+            reportFailure(error, {
+              operation: "execution_capability.mcp_2026",
+              component: "execution_capabilities",
+              executionId,
+            });
+          },
+        },
+      );
       let responseLifecycleRegistered = false;
       const closeMcp = async (): Promise<void> => {
-        await closeCapabilityResource("mcp_server", executionId, () => server.close());
-        await closeCapabilityResource("mcp_transport", executionId, () => transport.close());
+        await closeCapabilityResource("mcp_handler", executionId, () => handler.close());
       };
       try {
-        await server.connect(transport);
-        const response = await transport.handleRequest(request);
+        const response = await handler.fetch(request);
         responseLifecycleRegistered = true;
         return registerResponseLifecycle(response, {
           // HTTP finish only proves that Node flushed the MCP response. The
@@ -153,8 +162,8 @@ function createMcpServer(
     outputsByToolName.set(output.capability.tool.name, output);
   }
 
-  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools }));
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler("tools/list", () => ({ tools }));
+  server.setRequestHandler("tools/call", async (request) => {
     const toolName = request.params.name;
     const contract = contracts.get(toolName);
     if (contract === undefined) return toolFailure(`Tool ${toolName} not found`);
@@ -290,7 +299,7 @@ async function executeOutputCall(
       reportFailure(recordError, {
         operation: "execution_capability.output.record_failure",
         component: "execution_capabilities",
-        executionId: execution.id,
+        executionId,
       });
     }
     return toolFailure(
