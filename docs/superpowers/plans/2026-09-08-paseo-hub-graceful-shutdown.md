@@ -213,15 +213,15 @@
 - Consumes: Task 3’s pushed commit and package SHA, the unchanged HP service environment, and live Dell/Neo daemon connections.
 - Produces: real systemd stop duration/final state, no validation-window SIGABRT/coredump, successful restart on the same data directory, reconnects, OpenAPI response, and fresh Dell/Neo PONG agent IDs.
 
-- [ ] **Step 1: Snapshot the exact HP Hub rollback target.**
+- [x] **Step 1: Snapshot the exact HP Hub rollback target.**
 
   Through `tailscale ssh anvil-node-01.tail530013.ts.net`, capture the unit text/hash, drop-in text/hash, ExecStart package path/hash, data-directory identity, endpoint, and active PID. Capture Dell/Neo daemon IDs and Hub-connected status immediately before deployment. Do not touch FreeLLMAPI, eligibility, echo, model Serve, Tailscale, OpenViking, or deleted snapshot trees.
 
-- [ ] **Step 2: Transfer and install only the candidate Hub package target.**
+- [x] **Step 2: Transfer and install only the candidate Hub package target.**
 
   Transfer the Dell-built tarball to a new non-live staging path on HP, verify the tarball SHA-256 there, and install it into the existing Hub package target while retaining the same unit, environment, endpoint, and data directory. Keep the predeploy package path available for rollback; do not create migration archives or OpenViking data.
 
-- [ ] **Step 3: Verify both daemons are connected, then stop the exact unit.**
+- [x] **Step 3: Verify both daemons are connected, then stop the exact unit.**
 
   Run a timed command on HP with no changed timeout:
 
@@ -236,15 +236,15 @@
 
   Require a successful inactive/dead result before 45 seconds, target normally under 10 seconds, and no new Hub coredump or `SIGABRT` in the exact stop journal window. Preserve the raw command output and journal timestamps.
 
-- [ ] **Step 4: Start the same service and prove data/API continuity.**
+- [x] **Step 4: Start the same service and prove data/API continuity.**
 
   Start `anvil-fabric-hub.service` with the existing unit and data directory. Require active/running, `/api/openapi.json` HTTP 200, unchanged embedded database identity/row continuity, and the same endpoint. Capture the new PID and startup logs without modifying model services.
 
-- [ ] **Step 5: Prove Dell and Neo reconnect without pre-stopping either daemon.**
+- [x] **Step 5: Prove Dell and Neo reconnect without pre-stopping either daemon.**
 
   Verify each stable-name Paseo daemon is connected to the HP Hub, then run a fresh Free Pool PONG request on Dell and a fresh Free Pool PONG request on Neo. Record each fresh agent ID, request/response status, and Hub execution evidence. Confirm `app.paseo.sh` still presents Dell as the default general host and Neo as the thin Apple host through read-only checks.
 
-- [ ] **Step 6: Roll back only if candidate runtime gates fail.**
+- [x] **Step 6: Roll back only if candidate runtime gates fail (not invoked; candidate gates passed).**
 
   If startup, persistence, reconnection, or model access fails, stop the candidate, restore the exact predeploy package target and unchanged unit/data configuration, start it, and capture the failure. Continue source debugging on Dell; never change topology or recreate deleted migration artifacts.
 
@@ -262,11 +262,11 @@
 - Consumes: Tasks 0–4 evidence, local test/build/package output, pushed branch SHA, and the existing Drive Active Pointers/Hub Registry IDs.
 - Produces: a hash-verified Battle Report with one of the exact verdicts `HUB_GRACEFUL_SHUTDOWN_REPAIRED` or `PARTIAL_WITH_EXACT_BLOCKER`, Drive report/sidecar IDs, a read-back pointer update limited to `PASEO_HUB_CONTROL_PLANE`, and an ANVIL event read-back.
 
-- [ ] **Step 1: Assemble the twelve required receipt sections.**
+- [x] **Step 1: Assemble the twelve required receipt sections.**
 
   Write `BATTLE_REPORT.md` with these exact headings and concrete evidence: `PROVEN`, `MISSING EVIDENCE`, `POSSIBLY WRONG OR OVERSTATED`, `SOURCE TRUTH INSPECTED`, `ROOT CAUSE`, `CHANGED FILES`, `TESTS AND BUILD`, `HP LIVE LIFECYCLE PROOF`, `DELL AND NEO POST-RESTART PROOF`, `GIT REF AND PACKAGE HASH`, `DRIVE PUBLICATION`, and `EXACT NEXT ACTION`. Include pre-fix timing, post-fix focused test, HP stop duration/final state, coredump-window result, OpenAPI 200, persisted state read-back, Dell PONG agent ID, Neo PONG agent ID, branch/commit, package SHA-256, report SHA-256, and Drive IDs with evidence labels.
 
-- [ ] **Step 2: Hash and publish the receipt.**
+- [x] **Step 2: Hash and publish the receipt.**
 
   ```bash
   sha256sum runs/20260908T035452Z-paseo-hub-graceful-shutdown/receipts/BATTLE_REPORT.md > runs/20260908T035452Z-paseo-hub-graceful-shutdown/receipts/BATTLE_REPORT.sha256
@@ -275,14 +275,14 @@
 
   Upload the report and sidecar to the canonical Dell evidence folder, then read both file metadata records back. Do not upload credentials, raw auth headers, or private key material.
 
-- [ ] **Step 3: Update only the Hub Active Pointer after receipt verification.**
+- [x] **Step 3: Update only the Hub Active Pointer after receipt verification.**
 
   Use native Google Sheets batch update on spreadsheet `1VELPIXR1wjOCZdUFjd0xE7yLyF0lJBaUPmZYH2n99cI`, tab `Sheet1`, updating only the `PASEO_HUB_CONTROL_PLANE` row’s observed receipt reference/hash/verdict. Read back that row plus `ANVIL_THREE_NODE_MODEL_PLANE` and `NEO_APPLE_EXECUTION_PLANE` to prove placement was preserved. Do not rewrite unrelated provider or topology rows.
 
-- [ ] **Step 4: Record and read back the ANVIL closure decision.**
+- [x] **Step 4: Record and read back the ANVIL closure decision.**
 
   Through the canonical ANVIL MCP wrapper, record the repair verdict, source commit, package SHA, HP stop duration, and report SHA, then read the event log by returned event ID. Treat the event read-back as `PROVEN` only when the exact ID and fields match.
 
-- [ ] **Step 5: Run the universal final gate and close with the exact next action.**
+- [x] **Step 5: Run the universal final gate and close with the exact next action.**
 
   Run `./scripts/final-gate.sh /home/nayte/ANVIL-worker/repos/paseo-hub-graceful-shutdown-20260908` and include its result as hygiene evidence separate from the Hub lifecycle gates. Mark the verdict repaired only when the real HP stop is clean and normally under 10 seconds, all post-restart gates pass, focused tests pass, and the pushed source/package/receipt/pointer hashes agree. Otherwise mark `PARTIAL_WITH_EXACT_BLOCKER` and name the remaining blocker precisely.
