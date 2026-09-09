@@ -8,6 +8,7 @@ import {
   HubConfigurationCompilationError,
   type JsonValue,
 } from "./compiler.js";
+import { StatelessExternalMcpServersSchema } from "./external-mcp.js";
 import {
   collectPromptPartialPaths,
   hashPromptPartialContent,
@@ -69,6 +70,7 @@ const JsonAgentSchema = z
     mode: z.string().min(1).optional(),
     thinkingOptionId: z.string().min(1).optional(),
     options: z.record(z.string(), z.custom<JsonValue>(isJsonValue)).optional(),
+    mcpServers: StatelessExternalMcpServersSchema.optional(),
   })
   .strict();
 

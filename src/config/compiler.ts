@@ -23,6 +23,11 @@ import {
   type CompiledGitHubAuthority,
 } from "./github-authority.js";
 import { validateConnectionTemplate } from "./connection-template.js";
+import {
+  StatelessExternalMcpServersSchema,
+  cloneStatelessExternalMcpServers,
+  type StatelessExternalMcpServers,
+} from "./external-mcp.js";
 
 const IDENTIFIER = /^[a-z][a-z0-9_-]*$/u;
 const EVENT_NAME = /^[a-z][a-z0-9_-]*\.[a-z][a-z0-9_-]*$/u;
@@ -51,6 +56,7 @@ const AgentSchema = z
     mode: z.string().min(1).optional(),
     thinkingOptionId: z.string().min(1).optional(),
     options: z.record(z.string(), z.custom<JsonValue>(isJsonValue)).optional(),
+    mcpServers: StatelessExternalMcpServersSchema.optional(),
   })
   .strict();
 
@@ -219,6 +225,7 @@ export interface CompiledAgent {
   mode?: string | undefined;
   thinkingOptionId?: string | undefined;
   options?: Readonly<Record<string, JsonValue>> | undefined;
+  mcpServers?: StatelessExternalMcpServers | undefined;
 }
 
 export interface CompiledNamedAgentSelection {
@@ -326,6 +333,7 @@ const CompiledAgentSchema: z.ZodType<CompiledAgent> = z
     mode: z.string().min(1).optional(),
     thinkingOptionId: z.string().min(1).optional(),
     options: z.record(z.string(), z.custom<JsonValue>(isJsonValue)).optional(),
+    mcpServers: StatelessExternalMcpServersSchema.optional(),
   })
   .strict();
 
@@ -646,6 +654,9 @@ function cloneAgent(agent: CompiledAgent): CompiledAgent {
   return {
     ...agent,
     ...(agent.options === undefined ? {} : { options: cloneJsonObject(agent.options) }),
+    ...(agent.mcpServers === undefined
+      ? {}
+      : { mcpServers: cloneStatelessExternalMcpServers(agent.mcpServers) }),
   };
 }
 
