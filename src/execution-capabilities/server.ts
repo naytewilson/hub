@@ -162,7 +162,13 @@ function createMcpServer(
     outputsByToolName.set(output.capability.tool.name, output);
   }
 
-  server.setRequestHandler("tools/list", () => ({ tools }));
+  server.setRequestHandler("tools/list", () => ({
+    tools: tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+    })),
+  }));
   server.setRequestHandler("tools/call", async (request) => {
     const toolName = request.params.name;
     const contract = contracts.get(toolName);
@@ -299,7 +305,7 @@ async function executeOutputCall(
       reportFailure(recordError, {
         operation: "execution_capability.output.record_failure",
         component: "execution_capabilities",
-        executionId,
+        executionId: execution.id,
       });
     }
     return toolFailure(

@@ -62,7 +62,7 @@ describe("execution capability MCP 2026 boundary", () => {
       name: "unsupported method",
       method: "resources/list",
       token: "token",
-      expectedStatus: 200,
+      expectedStatus: 404,
       expectedCode: -32601,
     },
     {
@@ -111,7 +111,8 @@ describe("execution capability MCP 2026 boundary", () => {
     assert.equal(response.headers.get("mcp-session-id"), null);
     if (testCase.expectedCode !== undefined || testCase.expectedToolError === true) {
       const body = RpcResponseSchema.parse(await response.json());
-      if (testCase.expectedCode !== undefined) assert.equal(body.error?.code, testCase.expectedCode);
+      if (testCase.expectedCode !== undefined)
+        assert.equal(body.error?.code, testCase.expectedCode);
       if (testCase.expectedToolError === true) {
         assert.equal(ToolResultSchema.parse(body.result).isError, true);
       }
@@ -245,7 +246,8 @@ describe("execution capability MCP 2026 boundary", () => {
           },
           {
             name: "reply",
-            description: "Sends a reply to the conversation that triggered this execution. (up to 1 times).",
+            description:
+              "Sends a reply to the conversation that triggered this execution. (up to 1 times).",
           },
         ],
       );
@@ -276,7 +278,10 @@ describe("execution capability MCP 2026 boundary", () => {
     let responseFinished = false;
     const fixture = await capabilityFixture(undefined, "succeeded", 1, undefined, true);
     const endpoint = await serveFixture(fixture);
-    const observeFinish = (_request: unknown, response: { once(name: string, handler: () => void): void }) => {
+    const observeFinish = (
+      _request: unknown,
+      response: { once(name: string, handler: () => void): void },
+    ) => {
       response.once("finish", () => {
         responseFinished = true;
       });
@@ -342,7 +347,9 @@ describe("execution capability MCP 2026 boundary", () => {
     );
     assert.ok(tool);
     assert.ok(isRecord(tool.inputSchema));
-    const independentValidator = new Ajv({ allErrors: true, strict: true }).compile(tool.inputSchema);
+    const independentValidator = new Ajv({ allErrors: true, strict: true }).compile(
+      tool.inputSchema,
+    );
     assert.equal(
       independentValidator({
         output: {
@@ -523,8 +530,14 @@ describe("execution capability MCP 2026 boundary", () => {
       false,
       ["slack.reply"],
     );
-    const failed = await fixture.call("tools/call", { name: "reply", arguments: { content: "first" } });
-    const retry = await fixture.call("tools/call", { name: "reply", arguments: { content: "second" } });
+    const failed = await fixture.call("tools/call", {
+      name: "reply",
+      arguments: { content: "first" },
+    });
+    const retry = await fixture.call("tools/call", {
+      name: "reply",
+      arguments: { content: "second" },
+    });
 
     assert.equal(ToolResultSchema.parse(failed.result).isError, true);
     assert.equal(ToolResultSchema.parse(retry.result).isError, undefined);
@@ -626,7 +639,9 @@ function modernClient(): Client {
 }
 
 async function serveFixture(fixture: Awaited<ReturnType<typeof capabilityFixture>>) {
-  const server = createFetchServer((request) => fixture.server.handle(request, fixture.executionId));
+  const server = createFetchServer((request) =>
+    fixture.server.handle(request, fixture.executionId),
+  );
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", resolve);
@@ -705,11 +720,7 @@ function modernRequest(
   });
 }
 
-function modernHeaders(
-  method: string,
-  token?: string,
-  name?: string,
-): Record<string, string> {
+function modernHeaders(method: string, token?: string, name?: string): Record<string, string> {
   return {
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
