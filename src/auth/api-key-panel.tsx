@@ -89,6 +89,11 @@ const SCOPE_OPTIONS = [
     label: "Enroll daemons",
     description: "Issue a daemon enrollment token.",
   },
+  {
+    value: "rooms:read",
+    label: "Read Rooms",
+    description: "Read projected ANVIL Room state (requires a configured Room read seam).",
+  },
 ] as const;
 
 const TABLE_COLUMNS = [

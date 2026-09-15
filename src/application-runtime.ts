@@ -28,6 +28,7 @@ import { CompositionResources } from "./composition-resources.js";
 import { TriggerDashboard } from "./triggers/dashboard.js";
 import type { ProviderApplications } from "./provider-applications/index.js";
 import { DaemonProviderCatalog } from "./daemons/provider-catalog.js";
+import type { RoomAuthoritySource } from "./room-projection/index.js";
 
 export interface ApplicationCompositionOptions {
   database: Database | null;
@@ -42,6 +43,7 @@ export interface ApplicationCompositionOptions {
   completionTokenSecret?: string;
   testTriggerRoutes?: boolean;
   daemonConnectionForId?: DaemonDispatchLifecycleOptions["connectionForDaemon"];
+  roomAuthority?: RoomAuthoritySource;
   close(): Promise<void>;
 }
 
@@ -56,6 +58,26 @@ export async function createApplicationRuntime(
     await resources.close();
     throw error;
   }
+}
+
+type HubApplicationOptions = Parameters<typeof createHubApplication>[0];
+
+function hubApplicationOptions(
+  options: ApplicationCompositionOptions,
+  executionAuthority: ExecutionAuthority | undefined,
+): Partial<HubApplicationOptions> {
+  return {
+    ...(executionAuthority === undefined ? {} : { executionAuthority }),
+    ...(options.auth === null ? {} : { browserOrganizationAccess: options.auth }),
+    ...(options.publicBaseUrl === undefined ? {} : { publicBaseUrl: options.publicBaseUrl }),
+    ...(options.completionTokenSecret === undefined
+      ? {}
+      : { completionTokenSecret: options.completionTokenSecret }),
+    ...(options.daemonConnectionForId === undefined
+      ? {}
+      : { daemonConnectionForId: options.daemonConnectionForId }),
+    ...(options.roomAuthority === undefined ? {} : { roomAuthority: options.roomAuthority }),
+  };
 }
 
 async function createOwnedApplicationRuntime(
@@ -90,7 +112,6 @@ async function createOwnedApplicationRuntime(
     database: options.database,
     entitlements: options.entitlements,
     providerFactories: registrations.flatMap((registration) => registration.triggerProviders),
-    ...(executionAuthority === undefined ? {} : { executionAuthority }),
     attachmentResolvers: Object.fromEntries(
       registrations.flatMap((registration) =>
         registration.attachment === undefined
@@ -99,19 +120,12 @@ async function createOwnedApplicationRuntime(
       ),
     ),
     connectionsForProject,
-    ...(options.auth === null ? {} : { browserOrganizationAccess: options.auth }),
     publicApi:
       options.auth?.publicCredentials === undefined
         ? { status: "unavailable" }
         : { status: "enabled", authenticator: options.auth.publicCredentials },
-    ...(options.publicBaseUrl === undefined ? {} : { publicBaseUrl: options.publicBaseUrl }),
-    ...(options.completionTokenSecret === undefined
-      ? {}
-      : { completionTokenSecret: options.completionTokenSecret }),
     outputRegistry,
-    ...(options.daemonConnectionForId === undefined
-      ? {}
-      : { daemonConnectionForId: options.daemonConnectionForId }),
+    ...hubApplicationOptions(options, executionAuthority),
   });
   ownership.own(() => application.hub.stop());
   await application.hub.start(registrations.flatMap((registration) => registration.sources));

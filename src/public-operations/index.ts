@@ -15,6 +15,7 @@ import type {
   PublicOperationRepository,
   PublicOperations,
 } from "./types.js";
+import { RoomCapabilityDeniedError, RoomNotFoundError } from "../room-projection/index.js";
 import { TriggerDocumentError } from "../triggers/configuration/index.js";
 
 export type * from "./types.js";
@@ -226,7 +227,55 @@ export function createPublicOperations(
         return storageUnavailableOrThrow(error);
       }
     },
+    async listRooms() {
+      const authority = capabilities.roomAuthority;
+      if (authority === undefined) return { status: "room_projection_unavailable" };
+      try {
+        return { status: "listed", rooms: await authority.reader.listReadableRooms() };
+      } catch (error) {
+        return storageUnavailableOrThrow(error);
+      }
+    },
+    async getRoomSnapshot(_authorization, input) {
+      const authority = capabilities.roomAuthority;
+      if (authority === undefined) return { status: "room_projection_unavailable" };
+      try {
+        const snapshot = await authority.reader.readSnapshot(input.roomId);
+        return { status: "ok", room: snapshot.room, participants: snapshot.participants };
+      } catch (error) {
+        return roomReadErrorOrThrow(error);
+      }
+    },
+    async replayRoomEvents(_authorization, input) {
+      const authority = capabilities.roomAuthority;
+      if (authority === undefined) return { status: "room_projection_unavailable" };
+      try {
+        const page = await authority.reader.replayEvents(input.roomId, input.after, input.limit);
+        const lastSeq = page.events[page.events.length - 1]?.room_seq ?? input.after;
+        return {
+          status: "ok",
+          room: page.room,
+          events: page.events,
+          latest_seq: page.latestSeq,
+          next_cursor: lastSeq,
+          has_more: page.latestSeq > lastSeq,
+        };
+      } catch (error) {
+        return roomReadErrorOrThrow(error);
+      }
+    },
   };
+}
+
+function roomReadErrorOrThrow(
+  error: unknown,
+):
+  | { status: "room_not_found" }
+  | { status: "capability_denied" }
+  | { status: "infrastructure_unavailable" } {
+  if (error instanceof RoomNotFoundError) return { status: "room_not_found" };
+  if (error instanceof RoomCapabilityDeniedError) return { status: "capability_denied" };
+  return storageUnavailableOrThrow(error);
 }
 
 function triggerCapability(capabilities: PublicOperationCapabilities, organizationId: string) {

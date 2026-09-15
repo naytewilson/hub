@@ -4,15 +4,18 @@ import { isDatabaseUnavailableError } from "../db/errors.js";
 import { reportFailure } from "../failures/index.js";
 import type {
   DispatchManualRunResult,
+  GetRoomSnapshotResult,
   InstallConfigurationResult,
   InstallTriggerResult,
   IssueEnrollmentTokenResult,
   ListProjectsResult,
+  ListRoomsResult,
   ListTriggersResult,
   ListConfigurationResourcesResult,
   ListSetupResourcesResult,
   PublicAuthorization,
   PublicOperations,
+  ReplayRoomEventsResult,
   ValidateConfigurationResult,
   ValidateTriggerResult,
 } from "../public-operations/index.js";
@@ -22,6 +25,9 @@ import {
   InstalledConfigurationSchema,
   InstalledTriggerSchema,
   ProjectListSchema,
+  RoomEventPageSchema,
+  RoomListSchema,
+  RoomSnapshotSchema,
   TriggerListSchema,
   ConfigurationResourcesSchema,
   SetupResourcesSchema,
@@ -50,7 +56,10 @@ type PublicOperationResult =
   | ValidateConfigurationResult
   | InstallConfigurationResult
   | DispatchManualRunResult
-  | IssueEnrollmentTokenResult;
+  | IssueEnrollmentTokenResult
+  | ListRoomsResult
+  | GetRoomSnapshotResult
+  | ReplayRoomEventsResult;
 
 export interface PublicApi {
   handle(request: Request): Promise<Response>;
@@ -73,8 +82,11 @@ export function createPublicApi(
     handle(request) {
       const url = new URL(request.url);
       const requestId = request.headers.get("x-request-id")?.trim() || randomUUID();
-      const pathRoutes = publicOperationManifest.filter((route) => route.path === url.pathname);
-      if (pathRoutes.length === 0) {
+      const pathMatches = publicOperationManifest.flatMap((route) => {
+        const params = matchRoutePath(route.path, url.pathname);
+        return params === undefined ? [] : [{ route, params }];
+      });
+      if (pathMatches.length === 0) {
         return Promise.resolve(
           problem(
             requestId,
@@ -85,10 +97,10 @@ export function createPublicApi(
           ),
         );
       }
-      const route = pathRoutes.find(
-        (candidate) => candidate.method.toUpperCase() === request.method.toUpperCase(),
+      const matched = pathMatches.find(
+        ({ route }) => route.method.toUpperCase() === request.method.toUpperCase(),
       );
-      if (route === undefined) {
+      if (matched === undefined) {
         const response = problem(
           requestId,
           405,
@@ -98,15 +110,23 @@ export function createPublicApi(
         );
         response.headers.set(
           "allow",
-          pathRoutes.map(({ method }) => method.toUpperCase()).join(", "),
+          pathMatches.map(({ route }) => route.method.toUpperCase()).join(", "),
         );
         return Promise.resolve(response);
       }
-      return executeSafely(route.id, request, requestId, composition, operations);
+      return executeSafely(
+        matched.route.id,
+        request,
+        requestId,
+        composition,
+        operations,
+        matched.params,
+      );
     },
     handleOperation(id, request) {
       const requestId = request.headers.get("x-request-id")?.trim() || randomUUID();
-      return executeSafely(id, request, requestId, composition, operations);
+      const params = matchRoutePath(publicOperation(id).path, new URL(request.url).pathname) ?? {};
+      return executeSafely(id, request, requestId, composition, operations, params);
     },
     openapi() {
       return Response.json(publicOpenApiDocument, {
@@ -116,12 +136,38 @@ export function createPublicApi(
   };
 }
 
+/**
+ * Matches a manifest path template against a request pathname. `{name}`
+ * segments capture one non-empty path segment each; exact templates match
+ * literally and capture nothing.
+ */
+function matchRoutePath(template: string, pathname: string): Record<string, string> | undefined {
+  if (!template.includes("{")) return template === pathname ? {} : undefined;
+  const names: string[] = [];
+  const source = template
+    .split("/")
+    .map((segment) => {
+      if (segment.startsWith("{") && segment.endsWith("}") && segment.length > 2) {
+        names.push(segment.slice(1, -1));
+        return "([^/]+)";
+      }
+      return segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    })
+    .join("/");
+  const match = new RegExp(`^${source}$`, "u").exec(pathname);
+  if (match === null) return undefined;
+  return Object.fromEntries(
+    names.map((name, index) => [name, decodeURIComponent(match[index + 1]!)]),
+  );
+}
+
 async function executeSafely(
   id: PublicOperationId,
   request: Request,
   requestId: string,
   composition: PublicApiComposition,
   operations: PublicOperations | null,
+  routeParams: Record<string, string>,
 ): Promise<Response> {
   try {
     if (composition.status === "unavailable" || operations === null) {
@@ -133,7 +179,14 @@ async function executeSafely(
         "Public API authentication or storage is currently unavailable.",
       );
     }
-    return await execute(id, request, requestId, composition.authenticator, operations);
+    return await execute(
+      id,
+      request,
+      requestId,
+      composition.authenticator,
+      operations,
+      routeParams,
+    );
   } catch (error) {
     reportFailure(
       error,
@@ -162,6 +215,7 @@ async function execute(
   requestId: string,
   authenticator: OperationAuthenticator,
   operations: PublicOperations,
+  routeParams: Record<string, string>,
 ): Promise<Response> {
   const definition = publicOperation(id);
   const scope = definition.scope;
@@ -215,6 +269,19 @@ async function execute(
     }
     input = parsed.data;
   }
+  if (definition.routeSchema !== undefined) {
+    const url = new URL(request.url);
+    const routeInput: Record<string, unknown> = {};
+    for (const [key, value] of url.searchParams) {
+      routeInput[key] = value;
+    }
+    Object.assign(routeInput, routeParams);
+    const parsed = definition.routeSchema.safeParse(routeInput);
+    if (!parsed.success) {
+      return validationProblem(requestId, parsed.error.issues);
+    }
+    input = parsed.data;
+  }
   const result = await definition.invoke(operations, access, input);
   if (definition.resultMapping === "triggers") {
     if (!isTriggersResult(result)) throw new Error("invalid triggers operation result");
@@ -223,45 +290,150 @@ async function execute(
   return operationResponse(definition.resultMapping, requestId, result);
 }
 
+type ResultMapping = Exclude<PublicOperationDefinition["resultMapping"], "triggers">;
+
+const RESULT_RESPONDERS: Record<
+  ResultMapping,
+  (requestId: string, result: PublicOperationResult) => Response
+> = {
+  "trigger-validation": (requestId, result) =>
+    triggerValidationResponse(
+      requestId,
+      requireResult(isTriggerValidationResult, result, "trigger validation"),
+    ),
+  "trigger-installation": (requestId, result) =>
+    triggerInstallationResponse(
+      requestId,
+      requireResult(isTriggerInstallationResult, result, "trigger installation"),
+    ),
+  projects: (requestId, result) =>
+    projectsResponse(requestId, requireResult(isProjectsResult, result, "projects")),
+  "configuration-resources": (requestId, result) =>
+    configurationResourcesResponse(
+      requestId,
+      requireResult(isConfigurationResourcesResult, result, "configuration resources"),
+    ),
+  "setup-resources": (requestId, result) =>
+    setupResourcesResponse(
+      requestId,
+      requireResult(isSetupResourcesResult, result, "setup resources"),
+    ),
+  validation: (requestId, result) =>
+    validationResponse(requestId, requireResult(isValidationResult, result, "validation")),
+  configuration: (requestId, result) =>
+    installationResponse(requestId, requireResult(isInstallationResult, result, "configuration")),
+  "manual-run": (requestId, result) =>
+    manualRunResponse(requestId, requireResult(isManualRunResult, result, "manual-run")),
+  "enrollment-token": (requestId, result) =>
+    enrollmentResponse(requestId, requireResult(isEnrollmentResult, result, "enrollment")),
+  rooms: (requestId, result) =>
+    roomsResponse(requestId, requireResult(isRoomsResult, result, "rooms")),
+  "room-snapshot": (requestId, result) =>
+    roomSnapshotResponse(requestId, requireResult(isRoomSnapshotResult, result, "room snapshot")),
+  "room-events": (requestId, result) =>
+    roomEventsResponse(requestId, requireResult(isRoomEventsResult, result, "room events")),
+};
+
+function requireResult<Narrowed extends PublicOperationResult>(
+  guard: (result: PublicOperationResult) => result is Narrowed,
+  result: PublicOperationResult,
+  operation: string,
+): Narrowed {
+  if (!guard(result)) throw new Error(`invalid ${operation} operation result`);
+  return result;
+}
+
 function operationResponse(
-  mapping: Exclude<PublicOperationDefinition["resultMapping"], "triggers">,
+  mapping: ResultMapping,
   requestId: string,
   result: PublicOperationResult,
 ): Response {
-  switch (mapping) {
-    case "trigger-validation":
-      if (!isTriggerValidationResult(result)) throw new Error("invalid trigger validation result");
-      return triggerValidationResponse(requestId, result);
-    case "trigger-installation":
-      if (!isTriggerInstallationResult(result)) {
-        throw new Error("invalid trigger installation result");
-      }
-      return triggerInstallationResponse(requestId, result);
-    case "projects":
-      if (!isProjectsResult(result)) throw new Error("invalid projects operation result");
-      return projectsResponse(requestId, result);
-    case "configuration-resources":
-      if (!isConfigurationResourcesResult(result))
-        throw new Error("invalid configuration resources operation result");
-      return configurationResourcesResponse(requestId, result);
-    case "setup-resources":
-      if (!isSetupResourcesResult(result))
-        throw new Error("invalid setup resources operation result");
-      return setupResourcesResponse(requestId, result);
-    case "validation":
-      if (!isValidationResult(result)) throw new Error("invalid validation operation result");
-      return validationResponse(requestId, result);
-    case "configuration":
-      if (!isInstallationResult(result)) throw new Error("invalid configuration operation result");
-      return installationResponse(requestId, result);
-    case "manual-run":
-      if (!isManualRunResult(result)) throw new Error("invalid manual-run operation result");
-      return manualRunResponse(requestId, result);
-    case "enrollment-token":
-      if (!isEnrollmentResult(result)) throw new Error("invalid enrollment operation result");
-      return enrollmentResponse(requestId, result);
+  return RESULT_RESPONDERS[mapping](requestId, result);
+}
+
+function roomsResponse(requestId: string, result: ListRoomsResult): Response {
+  switch (result.status) {
+    case "listed":
+      return success(requestId, 200, RoomListSchema, { rooms: result.rooms });
+    case "room_projection_unavailable":
+      return roomProjectionUnavailableProblem(requestId);
+    case "infrastructure_unavailable":
+      return infrastructureProblem(requestId);
   }
-  return assertNever(mapping);
+  return assertNever(result);
+}
+
+function roomSnapshotResponse(requestId: string, result: GetRoomSnapshotResult): Response {
+  switch (result.status) {
+    case "ok":
+      return success(requestId, 200, RoomSnapshotSchema, {
+        room: result.room,
+        participants: result.participants,
+      });
+    case "room_not_found":
+      return problem(
+        requestId,
+        404,
+        "room_not_found",
+        "Room not found",
+        "No ANVIL Room exists with that public_id.",
+      );
+    case "capability_denied":
+      return capabilityDeniedProblem(requestId);
+    case "room_projection_unavailable":
+      return roomProjectionUnavailableProblem(requestId);
+    case "infrastructure_unavailable":
+      return infrastructureProblem(requestId);
+  }
+  return assertNever(result);
+}
+
+function roomEventsResponse(requestId: string, result: ReplayRoomEventsResult): Response {
+  switch (result.status) {
+    case "ok":
+      return success(requestId, 200, RoomEventPageSchema, {
+        room: result.room,
+        events: result.events,
+        latest_seq: result.latest_seq,
+        next_cursor: result.next_cursor,
+        has_more: result.has_more,
+      });
+    case "room_not_found":
+      return problem(
+        requestId,
+        404,
+        "room_not_found",
+        "Room not found",
+        "No ANVIL Room exists with that public_id.",
+      );
+    case "capability_denied":
+      return capabilityDeniedProblem(requestId);
+    case "room_projection_unavailable":
+      return roomProjectionUnavailableProblem(requestId);
+    case "infrastructure_unavailable":
+      return infrastructureProblem(requestId);
+  }
+  return assertNever(result);
+}
+
+function capabilityDeniedProblem(requestId: string): Response {
+  return problem(
+    requestId,
+    403,
+    "capability_denied",
+    "Room capability denied",
+    "The Hub instance's bound ANVIL subject lacks a durable room.read grant on this Room.",
+  );
+}
+
+function roomProjectionUnavailableProblem(requestId: string): Response {
+  return problem(
+    requestId,
+    503,
+    "room_projection_unavailable",
+    "Room projection unavailable",
+    "This Hub instance is not configured with an ANVIL Room read seam.",
+  );
 }
 
 function triggersResponse(requestId: string, result: ListTriggersResult): Response {
@@ -690,6 +862,34 @@ function isManualRunResult(result: PublicOperationResult): result is DispatchMan
 
 function isEnrollmentResult(result: PublicOperationResult): result is IssueEnrollmentTokenResult {
   return ["issued", "credential_revoked", "infrastructure_unavailable"].includes(result.status);
+}
+
+function isRoomsResult(result: PublicOperationResult): result is ListRoomsResult {
+  return (
+    result.status === "infrastructure_unavailable" ||
+    result.status === "room_projection_unavailable" ||
+    (result.status === "listed" && "rooms" in result)
+  );
+}
+
+function isRoomSnapshotResult(result: PublicOperationResult): result is GetRoomSnapshotResult {
+  return (
+    result.status === "infrastructure_unavailable" ||
+    result.status === "room_projection_unavailable" ||
+    result.status === "room_not_found" ||
+    result.status === "capability_denied" ||
+    (result.status === "ok" && "room" in result && "participants" in result)
+  );
+}
+
+function isRoomEventsResult(result: PublicOperationResult): result is ReplayRoomEventsResult {
+  return (
+    result.status === "infrastructure_unavailable" ||
+    result.status === "room_projection_unavailable" ||
+    result.status === "room_not_found" ||
+    result.status === "capability_denied" ||
+    (result.status === "ok" && "events" in result && "next_cursor" in result)
+  );
 }
 
 export { publicOpenApiDocument } from "./openapi.js";

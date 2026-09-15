@@ -48,6 +48,7 @@ import { createInvitationMailer } from "./invitations/index.js";
 import { composeEmailDelivery } from "./email/index.js";
 import { createAccountMailer } from "./auth/account-emails.js";
 import { migrateLegacyProjectTriggers } from "./triggers/migration.js";
+import { roomAuthorityFromEnvironment } from "./room-projection/index.js";
 
 export function startProductionRuntime(): Promise<ApplicationRuntime> {
   return startApplication(createProductionRuntime);
@@ -152,6 +153,11 @@ async function createProductionRuntime(): Promise<ApplicationRuntime> {
         return begin(new Request(url, { method: "POST", headers: request.headers }));
       },
     });
+    const roomAuthority = roomAuthorityFromEnvironment(process.env);
+    if (roomAuthority !== undefined) {
+      resources.own(() => roomAuthority.close());
+      logger.info("anvil room projection seam configured");
+    }
     const application = await createApplicationRuntime({
       database,
       auth,
@@ -162,6 +168,7 @@ async function createProductionRuntime(): Promise<ApplicationRuntime> {
       publicBaseUrl: identity.appUrl,
       completionTokenSecret: identity.authSecret,
       close: () => resources.close(),
+      ...(roomAuthority === undefined ? {} : { roomAuthority }),
     });
     const activationFailures = await activateProviderApplicationsAtStartup({
       store: providerStore,
