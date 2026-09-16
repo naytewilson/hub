@@ -238,6 +238,9 @@ describe("HTTP failure ownership", () => {
       installConfiguration: failOperation,
       dispatchManualRun: failOperation,
       issueEnrollmentToken: failOperation,
+      listRooms: failOperation,
+      getRoomSnapshot: failOperation,
+      replayRoomEvents: failOperation,
     };
     const api = createPublicApi(
       {

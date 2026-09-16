@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { WebSocket, type RawData } from "ws";
+import { WebSocket, WebSocketServer, type RawData } from "ws";
 import type { DaemonRecord } from "../db/types.js";
 import { HubDaemonHelloSchema } from "../hub/protocol.js";
 import { createLogger } from "../logger.js";
@@ -15,6 +15,31 @@ function rawDataToText(data: RawData): string {
   if (Array.isArray(data)) return Buffer.concat(data).toString();
   if (data instanceof ArrayBuffer) return Buffer.from(data).toString();
   return data.toString();
+}
+
+function testDaemon(): DaemonRecord {
+  const now = new Date();
+  return {
+    id: randomUUID(),
+    slug: "shutdown-daemon",
+    machineId: randomUUID(),
+    serverId: randomUUID(),
+    daemonPublicKey: "shutdown-public-key",
+    credentialVerifier: "shutdown-verifier",
+    permissions: ["hub.execute"],
+    registeredByApiKeyId: null,
+    registeredByCliCredentialId: null,
+    status: "active",
+    presence: "offline",
+    connectedAt: null,
+    disconnectedAt: null,
+    lastSeenAt: now,
+    createdAt: now,
+  };
+}
+
+function emitCloseNextTurn(webSocket: WebSocket): void {
+  queueMicrotask(() => webSocket.emit("close"));
 }
 
 describe("daemon socket protocol negotiation", () => {
@@ -226,6 +251,70 @@ describe("daemon socket generations", () => {
     assert.equal(await daemon.shutdownCompleted(), false);
     daemon.persistOfflinePresence();
     await daemon.shutdownCompletes();
+  });
+
+  it("terminates a non-cooperative daemon socket after the graceful-close deadline", async () => {
+    const shutdownDaemon = testDaemon();
+    let offlinePresenceWrites = 0;
+    const registry = new ActiveDaemonRegistry(
+      {
+        touchDaemon: async () => undefined,
+        setDaemonPresence: async (_daemonId, presence) => {
+          if (presence === "offline") offlinePresenceWrites += 1;
+        },
+      },
+      undefined,
+      undefined,
+      10,
+    );
+    const server = createServer();
+    const websocketServer = new WebSocketServer({ noServer: true });
+    let accepted: WebSocket | undefined;
+    const closeCalls: Array<{ code: unknown; reason: unknown }> = [];
+    let terminateCalls = 0;
+    const acceptSocket = (webSocket: WebSocket): void => {
+      accepted = webSocket;
+      vi.spyOn(webSocket, "close").mockImplementation((code, reason) => {
+        closeCalls.push({ code, reason });
+      });
+      const terminate = vi.spyOn(webSocket, "terminate");
+      terminate.mockImplementation(() => {
+        terminateCalls += 1;
+        emitCloseNextTurn(webSocket);
+        return webSocket;
+      });
+      registry.accept(shutdownDaemon, webSocket, "legacy");
+    };
+    const handleUpgrade = (
+      request: Parameters<typeof websocketServer.handleUpgrade>[0],
+      socket: Parameters<typeof websocketServer.handleUpgrade>[1],
+      head: Parameters<typeof websocketServer.handleUpgrade>[2],
+    ): void => {
+      websocketServer.handleUpgrade(request, socket, head, acceptSocket);
+    };
+    server.on("upgrade", handleUpgrade);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert(address && typeof address !== "string");
+    const client = new WebSocket(`ws://127.0.0.1:${address.port}/api/daemons/socket`);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        client.once("open", resolve);
+        client.once("error", reject);
+      });
+      assert.ok(accepted);
+
+      await registry.stop();
+
+      assert.deepEqual(closeCalls, [{ code: 1001, reason: "server shutdown" }]);
+      assert.equal(terminateCalls, 1);
+      assert.equal(registry.connection(shutdownDaemon.id), undefined);
+      assert.equal(offlinePresenceWrites, 1);
+    } finally {
+      client.terminate();
+      websocketServer.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("fails closed when a daemon does not acknowledge the Hub execution contract", async () => {

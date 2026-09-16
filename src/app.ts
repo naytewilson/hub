@@ -49,6 +49,7 @@ import { createPublicOperations } from "./public-operations/index.js";
 import { createDatabasePublicOperationRepository } from "./public-operations/database-adapter.js";
 import type { EntitlementsService } from "./entitlements/service.js";
 import type { ExecutionAuthority } from "./execution-authority/index.js";
+import type { RoomAuthoritySource } from "./room-projection/index.js";
 
 export interface HubRuntimeOptions {
   database: Database | null;
@@ -69,6 +70,12 @@ export interface HubRuntimeOptions {
   dispatchTimeoutMs?: number;
   browserOrganizationAccess?: BrowserOrganizationAccess;
   daemonConnectionForId?: DaemonDispatchLifecycleOptions["connectionForDaemon"];
+  /**
+   * Bound ANVIL Room read seam (PASEO_HUB_ANVIL_DATABASE_URL +
+   * PASEO_HUB_ANVIL_SUBJECT). Absent → Room projection operations answer
+   * `room_projection_unavailable` rather than serving unchecked state.
+   */
+  roomAuthority?: RoomAuthoritySource;
 }
 
 export interface HubRuntime {
@@ -363,6 +370,7 @@ function createAppPublicOperations(
           daemonAgentValidator ?? undefined,
         ),
       dispatchManualEvent: (input) => dispatchManualTrigger(manualSource, input),
+      ...(options.roomAuthority === undefined ? {} : { roomAuthority: options.roomAuthority }),
     },
     options.daemonClock,
   );

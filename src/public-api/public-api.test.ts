@@ -22,6 +22,9 @@ import {
   ProblemSchema,
   publicOperationManifest,
   publicOpenApiDocument,
+  RoomEventPageSchema,
+  RoomListSchema,
+  RoomSnapshotSchema,
   ValidatedConfigurationSchema,
 } from "./index.js";
 
@@ -280,6 +283,113 @@ describe("public API interface", () => {
   });
 });
 
+describe("Room projection routes", () => {
+  const ROOM_ID = "84af3583-23ff-4fcc-9838-ed3262499be2";
+
+  function get(path: string): Request {
+    return new Request(`https://hub.test${path}`, {
+      method: "GET",
+      headers: { authorization: "Bearer valid" },
+    });
+  }
+
+  it("serves list, snapshot, and replay through parameterized routes", async () => {
+    const api = createPublicApi(
+      { status: "enabled", authenticator: authenticator() },
+      successfulOperations(),
+    );
+
+    const rooms = await api.handle(get("/api/v1/rooms"));
+    assert.equal(rooms.status, 200);
+    RoomListSchema.parse(await rooms.json());
+
+    const snapshot = await api.handle(get(`/api/v1/rooms/${ROOM_ID}`));
+    assert.equal(snapshot.status, 200);
+    RoomSnapshotSchema.parse(await snapshot.json());
+
+    const page = await api.handle(get(`/api/v1/rooms/${ROOM_ID}/events?after=3&limit=1`));
+    assert.equal(page.status, 200);
+    RoomEventPageSchema.parse(await page.json());
+  });
+
+  it("captures the roomId path parameter and coerces replay query values", async () => {
+    let captured: unknown;
+    const api = createPublicApi(
+      { status: "enabled", authenticator: authenticator() },
+      {
+        ...successfulOperations(),
+        replayRoomEvents: (_authorization, input) => {
+          captured = input;
+          return Promise.resolve({
+            status: "ok",
+            room: projectedRoom(),
+            events: [],
+            latest_seq: 4,
+            next_cursor: 2,
+            has_more: true,
+          });
+        },
+      },
+    );
+
+    const response = await api.handle(get(`/api/v1/rooms/${ROOM_ID}/events?after=2&limit=7`));
+    assert.equal(response.status, 200);
+    assert.deepEqual(captured, { roomId: ROOM_ID, after: 2, limit: 7 });
+
+    const defaults = await api.handle(get(`/api/v1/rooms/${ROOM_ID}/events`));
+    assert.equal(defaults.status, 200);
+    assert.deepEqual(captured, { roomId: ROOM_ID, after: 0, limit: 500 });
+  });
+
+  it("rejects invalid room ids and replay cursors before the operation runs", async () => {
+    const api = createPublicApi(
+      { status: "enabled", authenticator: authenticator() },
+      successfulOperations(),
+    );
+    for (const path of [
+      "/api/v1/rooms/not-a-uuid",
+      `/api/v1/rooms/${ROOM_ID}/events?after=-1`,
+      `/api/v1/rooms/${ROOM_ID}/events?after=abc`,
+      `/api/v1/rooms/${ROOM_ID}/events?limit=0`,
+      `/api/v1/rooms/${ROOM_ID}/events?limit=501`,
+    ]) {
+      const response = await api.handle(get(path));
+      assert.equal(response.status, 400, path);
+      assert.equal(ProblemSchema.parse(await response.json()).code, "invalid_request", path);
+    }
+  });
+
+  it("enforces rooms:read scope before any projection read", async () => {
+    const api = createPublicApi(
+      { status: "enabled", authenticator: authenticator("forbidden") },
+      successfulOperations(),
+    );
+    const response = await api.handle(get(`/api/v1/rooms/${ROOM_ID}/events`));
+    assert.equal(response.status, 403);
+    assert.equal(ProblemSchema.parse(await response.json()).code, "insufficient_scope");
+  });
+
+  it("maps capability denial, unknown rooms, and an unconfigured seam distinctly", async () => {
+    for (const [result, status, code] of [
+      [{ status: "capability_denied" as const }, 403, "capability_denied"],
+      [{ status: "room_not_found" as const }, 404, "room_not_found"],
+      [{ status: "room_projection_unavailable" as const }, 503, "room_projection_unavailable"],
+      [{ status: "infrastructure_unavailable" as const }, 503, "infrastructure_unavailable"],
+    ] as const) {
+      const api = createPublicApi(
+        { status: "enabled", authenticator: authenticator() },
+        {
+          ...successfulOperations(),
+          getRoomSnapshot: () => Promise.resolve(result),
+        },
+      );
+      const response = await api.handle(get(`/api/v1/rooms/${ROOM_ID}`));
+      assert.equal(response.status, status, code);
+      assert.equal(ProblemSchema.parse(await response.json()).code, code);
+    }
+  });
+});
+
 describe("generated public OpenAPI", () => {
   it("contains only public v1 operations with complete auth, scopes, statuses, and schemas", async () => {
     const temporaryDirectory = await mkdtemp(join(tmpdir(), "paseo-openapi-"));
@@ -299,6 +409,9 @@ describe("generated public OpenAPI", () => {
       "/api/v1/daemons/enrollment-tokens",
       "/api/v1/manual-runs",
       "/api/v1/projects",
+      "/api/v1/rooms",
+      "/api/v1/rooms/{roomId}",
+      "/api/v1/rooms/{roomId}/events",
       "/api/v1/setup-resources",
       "/api/v1/triggers",
       "/api/v1/triggers/install",
@@ -325,15 +438,16 @@ describe("generated public OpenAPI", () => {
         ["200", "400", "401", "403", "404", "409", "500", "503"],
       ],
       "/api/v1/daemons/enrollment-tokens": ["daemons:enroll", ["201", "401", "403", "500", "503"]],
+      "/api/v1/rooms": ["rooms:read", ["200", "401", "403", "500", "503"]],
+      "/api/v1/rooms/{roomId}": ["rooms:read", ["200", "400", "401", "403", "404", "500", "503"]],
+      "/api/v1/rooms/{roomId}/events": [
+        "rooms:read",
+        ["200", "400", "401", "403", "404", "500", "503"],
+      ],
     } as const;
     for (const [path, [scope, statuses]] of Object.entries(expectations)) {
-      const operation =
-        path === "/api/v1/projects" ||
-        path === "/api/v1/triggers" ||
-        path === "/api/v1/configuration-resources" ||
-        path === "/api/v1/setup-resources"
-          ? publicOpenApiDocument.paths?.[path]?.get
-          : publicOpenApiDocument.paths?.[path]?.post;
+      const item = publicOpenApiDocument.paths?.[path];
+      const operation = item?.get ?? item?.post;
       assert.ok(operation?.operationId);
       assert.deepEqual(operation.security, [{ bearerAuth: [] }]);
       assert.deepEqual(Reflect.get(operation, "x-required-scopes"), [scope]);
@@ -508,6 +622,60 @@ function successfulOperations(): PublicOperations {
         token: "a".repeat(43),
         expiresAt: new Date("2026-08-06T18:10:00.000Z"),
       }),
+    listRooms: () => Promise.resolve({ status: "listed", rooms: [projectedRoom()] }),
+    getRoomSnapshot: () =>
+      Promise.resolve({
+        status: "ok",
+        room: projectedRoom(),
+        participants: [
+          {
+            participant_id: "84af3583-23ff-4fcc-9838-ed3262499be2",
+            agent_id: "f83dc934-02a0-4849-8de7-699110be24ed",
+            role: "worker",
+            joined_seq: 1,
+            acked_seq: 3,
+            joined_at: "2026-09-15T00:00:00.000Z",
+          },
+        ],
+      }),
+    replayRoomEvents: () =>
+      Promise.resolve({
+        status: "ok",
+        room: projectedRoom(),
+        events: [
+          {
+            event_id: "845e9d26-7977-45e1-bc69-d80a7b55a9cc",
+            room_id: "84af3583-23ff-4fcc-9838-ed3262499be2",
+            room_seq: 4,
+            kind: "message",
+            producer: "agent:f83dc934-02a0-4849-8de7-699110be24ed",
+            payload: { body: "hello" },
+            link: {},
+            correlation_id: "f83dc934-02a0-4849-8de7-699110be24ed",
+            causation_id: null,
+            task_ref: null,
+            campaign_id: null,
+            idempotency_key: "agent:f83dc934-02a0-4849-8de7-699110be24ed:4",
+            occurred_at: "2026-09-15T00:00:01.000Z",
+            created_at: "2026-09-15T00:00:01.000Z",
+          },
+        ],
+        latest_seq: 4,
+        next_cursor: 4,
+        has_more: false,
+      }),
+  };
+}
+
+function projectedRoom() {
+  return {
+    room_id: "84af3583-23ff-4fcc-9838-ed3262499be2",
+    project_ref: null,
+    status: "active" as const,
+    correlation_id: "f83dc934-02a0-4849-8de7-699110be24ed",
+    latest_seq: 4,
+    created_at: "2026-09-15T00:00:00.000Z",
+    updated_at: "2026-09-15T00:00:00.000Z",
   };
 }
 

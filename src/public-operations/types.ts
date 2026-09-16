@@ -2,6 +2,12 @@ import type { ApiKeyScope } from "../auth/api-key-contract.js";
 import type { HubBundleFile } from "../config/bundle.js";
 import type { TriggerRunRecord } from "../db/types.js";
 import type { DeploymentProjectResolution } from "../project-deployments/index.js";
+import type {
+  ProjectedRoom,
+  ProjectedRoomEvent,
+  ProjectedRoomParticipant,
+  RoomAuthoritySource,
+} from "../room-projection/index.js";
 
 export interface PublicAuthorization {
   kind: "apiKey" | "cliCredential";
@@ -164,6 +170,46 @@ export type ListTriggersResult =
   | { status: "listed"; triggers: readonly PublicTrigger[] }
   | InfrastructureUnavailable;
 
+export interface RoomSnapshotInput {
+  roomId: string;
+}
+
+export interface RoomEventsInput {
+  roomId: string;
+  after: number;
+  limit: number;
+}
+
+export type ListRoomsResult =
+  | { status: "listed"; rooms: readonly ProjectedRoom[] }
+  | { status: "room_projection_unavailable" }
+  | InfrastructureUnavailable;
+
+export type GetRoomSnapshotResult =
+  | {
+      status: "ok";
+      room: ProjectedRoom;
+      participants: readonly ProjectedRoomParticipant[];
+    }
+  | { status: "room_not_found" }
+  | { status: "capability_denied" }
+  | { status: "room_projection_unavailable" }
+  | InfrastructureUnavailable;
+
+export type ReplayRoomEventsResult =
+  | {
+      status: "ok";
+      room: ProjectedRoom;
+      events: readonly ProjectedRoomEvent[];
+      latest_seq: number;
+      next_cursor: number;
+      has_more: boolean;
+    }
+  | { status: "room_not_found" }
+  | { status: "capability_denied" }
+  | { status: "room_projection_unavailable" }
+  | InfrastructureUnavailable;
+
 export interface PublicOperations {
   listTriggers(authorization: PublicAuthorization): Promise<ListTriggersResult>;
   validateTrigger(
@@ -192,6 +238,15 @@ export interface PublicOperations {
     input: DispatchManualRunInput,
   ): Promise<DispatchManualRunResult>;
   issueEnrollmentToken(authorization: PublicAuthorization): Promise<IssueEnrollmentTokenResult>;
+  listRooms(authorization: PublicAuthorization): Promise<ListRoomsResult>;
+  getRoomSnapshot(
+    authorization: PublicAuthorization,
+    input: RoomSnapshotInput,
+  ): Promise<GetRoomSnapshotResult>;
+  replayRoomEvents(
+    authorization: PublicAuthorization,
+    input: RoomEventsInput,
+  ): Promise<ReplayRoomEventsResult>;
 }
 
 export interface PublicOperationRepository {
@@ -255,4 +310,10 @@ export interface PublicOperationCapabilities {
     receivedAt: Date;
     payload: unknown;
   }): Promise<{ providerEventReceiptId: string } | void>;
+  /**
+   * The bound ANVIL Room read seam. Absent when the instance is not configured
+   * for Room projection — operations then answer `room_projection_unavailable`
+   * rather than serving unauthenticated or partially projected state.
+   */
+  roomAuthority?: RoomAuthoritySource;
 }

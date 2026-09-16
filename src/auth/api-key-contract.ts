@@ -6,6 +6,7 @@ export const API_KEY_SCOPES = [
   "configuration:install",
   "runs:dispatch",
   "daemons:enroll",
+  "rooms:read",
 ] as const;
 
 export const apiKeyScopeSchema = z.enum(API_KEY_SCOPES);

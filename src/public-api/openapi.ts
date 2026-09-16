@@ -106,14 +106,22 @@ for (const definition of publicOperationManifest) {
     description: definition.description,
     tags: [definition.tag],
     security: [{ bearerAuth: [] }],
-    ...(definition.requestSchema === undefined
+    ...(definition.requestSchema === undefined &&
+    definition.paramsSchema === undefined &&
+    definition.querySchema === undefined
       ? {}
       : {
           request: {
-            body: {
-              required: true,
-              content: { "application/json": { schema: definition.requestSchema } },
-            },
+            ...(definition.requestSchema === undefined
+              ? {}
+              : {
+                  body: {
+                    required: true,
+                    content: { "application/json": { schema: definition.requestSchema } },
+                  },
+                }),
+            ...(definition.paramsSchema === undefined ? {} : { params: definition.paramsSchema }),
+            ...(definition.querySchema === undefined ? {} : { query: definition.querySchema }),
           },
         }),
     responses,
@@ -128,7 +136,7 @@ export const publicOpenApiDocument = new OpenApiGeneratorV31(registry.definition
       title: "Paseo Hub Public API",
       version: "1.0.0",
       description:
-        "Log in the CLI, list projects, validate and install configuration, dispatch manual runs, and enroll Paseo daemons.",
+        "Log in the CLI, list projects, validate and install configuration, dispatch manual runs, enroll Paseo daemons, and read projected ANVIL Room state.",
     },
     servers: [{ url: "/", description: "This Hub instance" }],
     tags: [
@@ -137,6 +145,7 @@ export const publicOpenApiDocument = new OpenApiGeneratorV31(registry.definition
       { name: "Configurations" },
       { name: "Runs" },
       { name: "Daemons" },
+      { name: "Rooms" },
     ],
   },
 );

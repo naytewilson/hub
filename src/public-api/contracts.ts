@@ -324,4 +324,116 @@ export const EnrollmentTokenSchema = z
     },
   });
 
+// --- ANVIL Room read/projection (read seam over ANVIL/Postgres authority) ---
+// Field names use the Foundation Interop V1 wire vocabulary (snake_case)
+// because every value is authority-minted and passed through unchanged.
+
+export const RoomIdParamsSchema = z.object({ roomId: z.string().uuid() }).openapi("RoomIdParams", {
+  description: "Durable Room identity: anvil.rooms.public_id.",
+});
+
+export const RoomEventsQuerySchema = z
+  .object({
+    after: z.number().int().nonnegative().default(0).openapi({
+      description:
+        "Replay cursor: only committed events with room_seq greater than this value are returned. Reconnect by re-issuing your last seen room_seq.",
+    }),
+    limit: z.number().int().min(1).max(500).default(500).openapi({
+      description: "Maximum events per page (1–500, default 500).",
+    }),
+  })
+  .openapi("RoomEventsQuery");
+
+/** Runtime route input (path params + query arrive as strings → coerce). */
+export const RoomSnapshotInputSchema = z.object({ roomId: z.string().uuid() });
+
+export const RoomEventsInputSchema = z.object({
+  roomId: z.string().uuid(),
+  after: z.coerce.number().int().nonnegative().default(0),
+  limit: z.coerce.number().int().min(1).max(500).default(500),
+});
+
+export const ProjectedRoomSchema = z
+  .object({
+    room_id: z.string().uuid(),
+    project_ref: z.string().nullable(),
+    status: z.enum(["active", "archived", "closed"]),
+    correlation_id: z.string().uuid(),
+    latest_seq: z.number().int().nonnegative(),
+    created_at: z.string().datetime({ offset: true }),
+    updated_at: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .openapi("ProjectedRoom", {
+    description:
+      "Projection of anvil.rooms. latest_seq is the committed high-water room_seq (0 when empty); room_id/correlation_id are authority-minted.",
+  });
+
+export const ProjectedRoomParticipantSchema = z
+  .object({
+    participant_id: z.string().uuid(),
+    agent_id: z.string().uuid(),
+    role: z.string(),
+    joined_seq: z.number().int().positive().nullable(),
+    acked_seq: z.number().int().nonnegative(),
+    joined_at: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .openapi("ProjectedRoomParticipant", {
+    description:
+      "Active anvil.room_participants period. agent_id is the durable anvil.agents.public_id — a participant is an agent, never a session.",
+  });
+
+export const ProjectedRoomEventSchema = z
+  .object({
+    event_id: z.string().uuid(),
+    room_id: z.string().uuid(),
+    room_seq: z.number().int().positive(),
+    kind: z.enum(["message", "handoff", "approval", "evidence_ref", "execution", "system"]),
+    producer: z.string(),
+    payload: z.record(z.string(), z.unknown()),
+    link: z.record(z.string(), z.unknown()),
+    correlation_id: z.string().uuid(),
+    causation_id: z.string().nullable(),
+    task_ref: z.string().uuid().nullable(),
+    campaign_id: z.string().nullable(),
+    idempotency_key: z.string(),
+    occurred_at: z.string().datetime({ offset: true }).nullable(),
+    created_at: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .openapi("ProjectedRoomEvent", {
+    description:
+      "One committed anvil.room_events row. room_seq is the canonical replay cursor (authority-assigned, per-room monotonic; gaps are legal). (room_id, room_seq) is the projection dedupe key.",
+  });
+
+export const RoomListSchema = z
+  .object({ rooms: z.array(ProjectedRoomSchema) })
+  .strict()
+  .openapi("RoomList", {
+    description: "Rooms the Hub instance's bound ANVIL subject may read.",
+  });
+
+export const RoomSnapshotSchema = z
+  .object({
+    room: ProjectedRoomSchema,
+    participants: z.array(ProjectedRoomParticipantSchema),
+  })
+  .strict()
+  .openapi("RoomSnapshot");
+
+export const RoomEventPageSchema = z
+  .object({
+    room: ProjectedRoomSchema,
+    events: z.array(ProjectedRoomEventSchema),
+    latest_seq: z.number().int().nonnegative(),
+    next_cursor: z.number().int().nonnegative(),
+    has_more: z.boolean(),
+  })
+  .strict()
+  .openapi("RoomEventPage", {
+    description:
+      "Deterministic replay page: events with room_seq > the request cursor, ascending. Re-issue next_cursor as `after` to continue; identical cursors replay identical sequences.",
+  });
+
 export type Problem = z.infer<typeof ProblemSchema>;

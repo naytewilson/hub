@@ -1,14 +1,18 @@
+import type { z } from "zod";
 import type { ApiKeyScope } from "../auth/api-key-contract.js";
 import type {
   DispatchManualRunResult,
+  GetRoomSnapshotResult,
   InstallConfigurationResult,
   InstallTriggerResult,
   IssueEnrollmentTokenResult,
   ListConfigurationResourcesResult,
+  ListRoomsResult,
   ListSetupResourcesResult,
   ListProjectsResult,
   ListTriggersResult,
   PublicOperations,
+  ReplayRoomEventsResult,
   ValidateConfigurationResult,
   ValidateTriggerResult,
 } from "../public-operations/index.js";
@@ -20,6 +24,13 @@ import {
   InstalledConfigurationSchema,
   InstalledTriggerSchema,
   ProjectListSchema,
+  RoomEventsInputSchema,
+  RoomEventsQuerySchema,
+  RoomEventPageSchema,
+  RoomIdParamsSchema,
+  RoomListSchema,
+  RoomSnapshotInputSchema,
+  RoomSnapshotSchema,
   TriggerListSchema,
   ConfigurationResourcesSchema,
   SetupResourcesSchema,
@@ -38,28 +49,29 @@ export type PublicOperationId =
   | "validateConfiguration"
   | "installConfiguration"
   | "dispatchManualRun"
-  | "issueEnrollmentToken";
+  | "issueEnrollmentToken"
+  | "listRooms"
+  | "getRoomSnapshot"
+  | "replayRoomEvents";
 
 export interface PublicOperationDefinition {
   id: PublicOperationId;
   method: "get" | "post";
+  /** Route template; `{name}` segments become captured path parameters. */
   path: string;
   scope: ApiKeyScope;
-  requestSchema?:
-    | typeof InstallConfigurationRequestSchema
-    | typeof DispatchManualRunRequestSchema
-    | typeof TriggerYamlRequestSchema;
-  successSchema:
-    | typeof InstalledTriggerSchema
-    | typeof ValidatedTriggerSchema
-    | typeof InstalledConfigurationSchema
-    | typeof ValidatedConfigurationSchema
-    | typeof ProjectListSchema
-    | typeof TriggerListSchema
-    | typeof ConfigurationResourcesSchema
-    | typeof SetupResourcesSchema
-    | typeof DispatchedManualRunSchema
-    | typeof EnrollmentTokenSchema;
+  /** JSON body schema (POST operations). */
+  requestSchema?: z.ZodType;
+  /**
+   * Route input schema for parameterized GET routes: validates the merged
+   * `{...pathParams, ...queryParams}` object before the operation runs.
+   */
+  routeSchema?: z.ZodType;
+  /** OpenAPI-only path-parameter schema for `{name}` segments. */
+  paramsSchema?: z.ZodObject;
+  /** OpenAPI-only query-parameter schema. */
+  querySchema?: z.ZodObject;
+  successSchema: z.ZodType;
   successStatus: 200 | 201;
   resultMapping:
     | "trigger-validation"
@@ -71,10 +83,13 @@ export interface PublicOperationDefinition {
     | "validation"
     | "configuration"
     | "manual-run"
-    | "enrollment-token";
+    | "enrollment-token"
+    | "rooms"
+    | "room-snapshot"
+    | "room-events";
   summary: string;
   description: string;
-  tag: "Triggers" | "Projects" | "Configurations" | "Runs" | "Daemons";
+  tag: "Triggers" | "Projects" | "Configurations" | "Runs" | "Daemons" | "Rooms";
   responses: Readonly<Record<number, string>>;
   invoke(
     operations: PublicOperations,
@@ -91,6 +106,9 @@ export interface PublicOperationDefinition {
     | InstallConfigurationResult
     | DispatchManualRunResult
     | IssueEnrollmentTokenResult
+    | ListRoomsResult
+    | GetRoomSnapshotResult
+    | ReplayRoomEventsResult
   >;
 }
 
@@ -326,6 +344,80 @@ export const publicOperationManifest: readonly PublicOperationDefinition[] = [
       503: "Hub authentication or storage is unavailable.",
     },
     invoke: (operations, authorization) => operations.issueEnrollmentToken(authorization),
+  },
+  {
+    id: "listRooms",
+    method: "get",
+    path: "/api/v1/rooms",
+    scope: "rooms:read",
+    successSchema: RoomListSchema,
+    successStatus: 200,
+    resultMapping: "rooms",
+    summary: "List readable Rooms",
+    description:
+      "Lists ANVIL Rooms the Hub instance's bound ANVIL subject may read (a durable global or room-scoped room.read grant in anvil.capability_grants). Projection only — Room state is owned by ANVIL authority; Hub never mints room identities.",
+    tag: "Rooms",
+    responses: {
+      200: "The Rooms readable by the bound ANVIL subject.",
+      401: "The bearer credential is missing, malformed, or revoked.",
+      403: "The bearer credential lacks rooms:read.",
+      500: "The operation failed unexpectedly.",
+      503: "Hub authentication, storage, or the ANVIL Room read seam is unavailable.",
+    },
+    invoke: (operations, authorization) => operations.listRooms(authorization),
+  },
+  {
+    id: "getRoomSnapshot",
+    method: "get",
+    path: "/api/v1/rooms/{roomId}",
+    scope: "rooms:read",
+    routeSchema: RoomSnapshotInputSchema,
+    paramsSchema: RoomIdParamsSchema,
+    successSchema: RoomSnapshotSchema,
+    successStatus: 200,
+    resultMapping: "room-snapshot",
+    summary: "Get a Room snapshot",
+    description:
+      "Returns the projected Room record (durable identity, status, committed room_seq high-water) and its active participants. Requires a durable room.read grant for the bound ANVIL subject on the target Room.",
+    tag: "Rooms",
+    responses: {
+      200: "The Room snapshot.",
+      400: "The roomId path parameter is invalid.",
+      401: "The bearer credential is missing, malformed, or revoked.",
+      403: "The bearer credential lacks rooms:read, or the bound ANVIL subject lacks room.read on the Room.",
+      404: "The Room does not exist.",
+      500: "The operation failed unexpectedly.",
+      503: "Hub authentication, storage, or the ANVIL Room read seam is unavailable.",
+    },
+    invoke: (operations, authorization, input) =>
+      operations.getRoomSnapshot(authorization, RoomSnapshotInputSchema.parse(input)),
+  },
+  {
+    id: "replayRoomEvents",
+    method: "get",
+    path: "/api/v1/rooms/{roomId}/events",
+    scope: "rooms:read",
+    routeSchema: RoomEventsInputSchema,
+    paramsSchema: RoomIdParamsSchema,
+    querySchema: RoomEventsQuerySchema,
+    successSchema: RoomEventPageSchema,
+    successStatus: 200,
+    resultMapping: "room-events",
+    summary: "Replay Room events from a cursor",
+    description:
+      "Deterministic cursor replay over the canonical room_seq: committed events with room_seq greater than `after`, ascending, deduplicated on (room_id, room_seq). Reconnect by re-issuing your last seen room_seq as `after`; identical cursors replay identical pages. Requires a durable room.read grant for the bound ANVIL subject on the target Room.",
+    tag: "Rooms",
+    responses: {
+      200: "A page of committed Room events after the cursor.",
+      400: "The roomId path parameter or replay cursor is invalid.",
+      401: "The bearer credential is missing, malformed, or revoked.",
+      403: "The bearer credential lacks rooms:read, or the bound ANVIL subject lacks room.read on the Room.",
+      404: "The Room does not exist.",
+      500: "The operation failed unexpectedly.",
+      503: "Hub authentication, storage, or the ANVIL Room read seam is unavailable.",
+    },
+    invoke: (operations, authorization, input) =>
+      operations.replayRoomEvents(authorization, RoomEventsInputSchema.parse(input)),
   },
 ];
 

@@ -1,4 +1,5 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { once } from "node:events";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
@@ -91,6 +92,7 @@ export type DaemonSessionProtocol = "legacy" | "session-v1";
 
 const DAEMON_SESSION_PROTOCOL_HEADER = "x-paseo-session-protocol";
 const DAEMON_SESSION_PROTOCOL_VERSION = "1";
+const DAEMON_SOCKET_CLOSE_TIMEOUT_MS = 5_000;
 
 type DaemonConnectedHandler = (daemon: DaemonRecord) => void | Promise<void>;
 type DaemonRevokedHandler = (daemon: DaemonRecord) => void | Promise<void>;
@@ -108,6 +110,7 @@ export class ActiveDaemonRegistry {
     private readonly database: Pick<Database, "setDaemonPresence" | "touchDaemon">,
     private readonly clock: DaemonClock = systemDaemonClock,
     private readonly failureLogger: Pick<Logger, "warn" | "error"> = defaultLogger,
+    private readonly socketCloseTimeoutMs = DAEMON_SOCKET_CLOSE_TIMEOUT_MS,
   ) {}
 
   accept(
@@ -128,22 +131,7 @@ export class ActiveDaemonRegistry {
     this.active.set(daemon.id, active);
     previous?.socket.close(4001, "replaced");
     socket.on("message", (data) => this.receive(active, readText(data)));
-    socket.on("close", () => {
-      if (this.active.get(daemon.id)?.generation === active.generation) {
-        this.active.delete(daemon.id);
-        this.rejectGeneration(daemon.id, active.generation);
-        const write = active.presenceReady.then(() =>
-          this.database.setDaemonPresence(daemon.id, "offline"),
-        );
-        this.presenceWrites.add(write);
-        void write.then(
-          () => this.presenceWrites.delete(write),
-          (error: unknown) => {
-            this.report(error, "daemon.presence.offline", daemon.id);
-          },
-        );
-      }
-    });
+    socket.on("close", () => this.handleSocketClosed(active));
     if (sessionProtocol === "legacy") {
       this.markReady(active);
     } else {
@@ -231,20 +219,67 @@ export class ActiveDaemonRegistry {
 
   async stop(): Promise<void> {
     const activeDaemons = Array.from(this.active.values());
-    const sockets = activeDaemons.map(
-      (active) =>
-        new Promise<void>((resolve) => {
-          if (active.socket.readyState === WebSocket.CLOSED) return resolve();
-          active.socket.once("close", () => resolve());
-          active.socket.close(1001, "server shutdown");
-        }),
-    );
+    const sockets = activeDaemons.map((active) => this.closeSocket(active));
     await Promise.all(sockets);
     await Promise.all(this.presenceWrites);
     for (const [daemonId, pending] of this.pendingByDaemon) {
       for (const request of pending.values()) request.reject(disconnectError(request));
       this.pendingByDaemon.delete(daemonId);
     }
+  }
+
+  private closeSocket(active: ActiveSocket): Promise<void> {
+    const socket = active.socket;
+    if (socket.readyState === WebSocket.CLOSED) {
+      this.handleSocketClosed(active);
+      return Promise.resolve();
+    }
+    let timeout: NodeJS.Timeout | undefined;
+    const closed = once(socket, "close").then(
+      () => "closed" as const,
+      () => "error" as const,
+    );
+    const deadline = new Promise<"timeout">((resolve) => {
+      timeout = setTimeout(() => resolve("timeout"), this.socketCloseTimeoutMs);
+    });
+    try {
+      socket.close(1001, "server shutdown");
+    } catch {
+      this.forceCloseSocket(active);
+      if (timeout !== undefined) clearTimeout(timeout);
+      return Promise.resolve();
+    }
+    return Promise.race([closed, deadline]).then((outcome) => {
+      if (timeout !== undefined) clearTimeout(timeout);
+      if (outcome !== "closed") this.forceCloseSocket(active);
+      return undefined;
+    });
+  }
+
+  private forceCloseSocket(active: ActiveSocket): void {
+    try {
+      active.socket.terminate();
+    } catch (error) {
+      this.report(error, "daemon.websocket.terminate", active.daemon.id);
+    } finally {
+      this.handleSocketClosed(active);
+    }
+  }
+
+  private handleSocketClosed(active: ActiveSocket): void {
+    if (this.active.get(active.daemon.id)?.generation !== active.generation) return;
+    this.active.delete(active.daemon.id);
+    this.rejectGeneration(active.daemon.id, active.generation);
+    const write = active.presenceReady.then(() =>
+      this.database.setDaemonPresence(active.daemon.id, "offline"),
+    );
+    this.presenceWrites.add(write);
+    void write.then(
+      () => this.presenceWrites.delete(write),
+      (error: unknown) => {
+        this.report(error, "daemon.presence.offline", active.daemon.id);
+      },
+    );
   }
 
   private createAgent(
