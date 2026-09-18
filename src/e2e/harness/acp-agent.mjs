@@ -5,6 +5,13 @@ import { Readable, Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 
 const sdk = await import(pathToFileURL(requiredEnvironment("HUB_E2E_ACP_SDK")).href);
+const MCP_PROTOCOL_VERSION = "2026-07-28";
+const MCP_CLIENT_INFO = { name: "hub-e2e", version: "1.0.0" };
+const MCP_META = {
+  "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+  "io.modelcontextprotocol/clientInfo": MCP_CLIENT_INFO,
+  "io.modelcontextprotocol/clientCapabilities": {},
+};
 
 class PhaseFiveAgent {
   constructor(connection) {
@@ -48,7 +55,6 @@ class PhaseFiveAgent {
     let replySucceeded = null;
     let duplicateRejected = null;
     if (service === "mcp-capability" && this.hubMcp) {
-      await initializeMcp(this.hubMcp);
       const reply = await callMcp(this.hubMcp, 2, "tools/call", {
         name: "reply",
         arguments: { content: output },
@@ -105,20 +111,17 @@ async function scheduleHubCompletion(server) {
   await rename(temporaryPath, jobPath);
 }
 
-async function initializeMcp(server) {
-  await callMcp(server, 1, "initialize", {
-    protocolVersion: "2025-06-18",
-    capabilities: {},
-    clientInfo: { name: "hub-e2e", version: "1" },
-  });
-}
-
 async function callMcp(server, id, method, params) {
   if (!server || server.type !== "http") throw new Error("Hub MCP server was not materialized");
   const response = await fetch(server.url, {
     method: "POST",
-    headers: mcpHeaders(server),
-    body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+    headers: mcpHeaders(server, method, params),
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method,
+      params: { ...params, _meta: MCP_META },
+    }),
   });
   if (!response.ok) throw new Error(`MCP ${method} failed: ${response.status}`);
   const body = await response.json();
@@ -126,10 +129,15 @@ async function callMcp(server, id, method, params) {
   return body;
 }
 
-function mcpHeaders(server) {
+function mcpHeaders(server, method, params) {
   return {
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
+    "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+    "mcp-method": method,
+    ...(method === "tools/call" && typeof params?.name === "string"
+      ? { "mcp-name": params.name }
+      : {}),
     ...Object.fromEntries((server?.headers ?? []).map((header) => [header.name, header.value])),
   };
 }
