@@ -1,5 +1,9 @@
 import type { DurableProviderEvent } from "../db/types.js";
 import type { JsonValue } from "../config/compiler.js";
+import {
+  cloneStatelessExternalMcpServers,
+  type StatelessExternalMcpServers,
+} from "../config/external-mcp.js";
 import type { WorktreeTarget } from "../config/index.js";
 import type { InvocationParseResult } from "./invocation.js";
 import type { ProviderEventDropReasonCode } from "./drop-reason.js";
@@ -38,6 +42,7 @@ export interface TriggerAgentConfig {
   model?: string | undefined;
   thinkingOptionId?: string | undefined;
   options?: Readonly<Record<string, JsonValue>> | undefined;
+  mcpServers?: StatelessExternalMcpServers | undefined;
 }
 
 export function cleanTriggerAgent(agent: TriggerAgentConfig): TriggerAgentConfig {
@@ -47,6 +52,9 @@ export function cleanTriggerAgent(agent: TriggerAgentConfig): TriggerAgentConfig
     ...(agent.model === undefined ? {} : { model: agent.model }),
     ...(agent.thinkingOptionId === undefined ? {} : { thinkingOptionId: agent.thinkingOptionId }),
     ...(agent.options === undefined ? {} : { options: structuredClone(agent.options) }),
+    ...(agent.mcpServers === undefined
+      ? {}
+      : { mcpServers: cloneStatelessExternalMcpServers(agent.mcpServers) }),
   };
 }
 
