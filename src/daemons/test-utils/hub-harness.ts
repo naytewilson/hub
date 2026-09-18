@@ -75,6 +75,22 @@ const MCP_META = {
   "io.modelcontextprotocol/clientInfo": MCP_CLIENT_INFO,
   "io.modelcontextprotocol/clientCapabilities": {},
 } as const;
+
+function executionMcpHeaders(
+  method: "tools/call" | "tools/list",
+  name: string | undefined,
+  token: string | undefined,
+): Record<string, string> {
+  return {
+    accept: "application/json, text/event-stream",
+    "content-type": "application/json",
+    "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+    "mcp-method": method,
+    ...(name === undefined ? {} : { "mcp-name": name }),
+    ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+  };
+}
+
 const hubOperationAuth: OperationAuthenticator = {
   async authorize(request: Request, _scope: ApiKeyScope) {
     return request.headers.get("authorization") === `Bearer ${HUB_API_KEY}`
@@ -1161,21 +1177,6 @@ export class HubHarness {
       })
       .parse(await response.json()).result.tools;
   }
-
-function executionMcpHeaders(
-  method: "tools/call" | "tools/list",
-  name: string | undefined,
-  token: string | undefined,
-): Record<string, string> {
-  return {
-    accept: "application/json, text/event-stream",
-    "content-type": "application/json",
-    "mcp-protocol-version": MCP_PROTOCOL_VERSION,
-    "mcp-method": method,
-    ...(name === undefined ? {} : { "mcp-name": name }),
-    ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
-  };
-}
 
   async restartApp(): Promise<void> {
     await this.stopApp();
