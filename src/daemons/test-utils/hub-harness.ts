@@ -68,6 +68,13 @@ const HUB_PROJECT_SLUG = "default";
 const HUB_USER_ID = "hub-harness";
 const HUB_API_KEY = "paseo_pk_hub-harness_test";
 const HUB_API_KEY_ID = "00000000-0000-4000-8000-0000000000aa";
+const MCP_PROTOCOL_VERSION = "2026-07-28";
+const MCP_CLIENT_INFO = { name: "hub-test-harness", version: "1.0.0" };
+const MCP_META = {
+  "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+  "io.modelcontextprotocol/clientInfo": MCP_CLIENT_INFO,
+  "io.modelcontextprotocol/clientCapabilities": {},
+} as const;
 const hubOperationAuth: OperationAuthenticator = {
   async authorize(request: Request, _scope: ApiKeyScope) {
     return request.headers.get("authorization") === `Bearer ${HUB_API_KEY}`
@@ -1090,16 +1097,12 @@ export class HubHarness {
     if (credential === "wrong") token = "wrong";
     const response = await fetch(`${this.origin}/agent-executions/${id}/mcp`, {
       method: "POST",
-      headers: {
-        accept: "application/json, text/event-stream",
-        "content-type": "application/json",
-        ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
-      },
+      headers: executionMcpHeaders("tools/call", "finish_execution", token),
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
         method: "tools/call",
-        params: { name: "finish_execution", arguments: {} },
+        params: { name: "finish_execution", arguments: {}, _meta: MCP_META },
       }),
     });
     return response.status;
@@ -1113,16 +1116,12 @@ export class HubHarness {
     const token = this.requireDaemon().completionToken(executionId);
     const response = await fetch(`${this.origin}/agent-executions/${executionId}/mcp`, {
       method: "POST",
-      headers: {
-        accept: "application/json, text/event-stream",
-        authorization: `Bearer ${token}`,
-        "content-type": "application/json",
-      },
+      headers: executionMcpHeaders("tools/call", name, token),
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
         method: "tools/call",
-        params: { name, arguments: args },
+        params: { name, arguments: args, _meta: MCP_META },
       }),
     });
     assert.equal(response.status, 200);
@@ -1137,15 +1136,12 @@ export class HubHarness {
     const token = this.requireDaemon().completionToken(executionId);
     const response = await fetch(`${this.origin}/agent-executions/${executionId}/mcp`, {
       method: "POST",
-      headers: {
-        accept: "application/json, text/event-stream",
-        authorization: `Bearer ${token}`,
-        "content-type": "application/json",
-      },
+      headers: executionMcpHeaders("tools/list", undefined, token),
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
         method: "tools/list",
+        params: { _meta: MCP_META },
       }),
     });
     assert.equal(response.status, 200);
@@ -1165,6 +1161,21 @@ export class HubHarness {
       })
       .parse(await response.json()).result.tools;
   }
+
+function executionMcpHeaders(
+  method: "tools/call" | "tools/list",
+  name: string | undefined,
+  token: string | undefined,
+): Record<string, string> {
+  return {
+    accept: "application/json, text/event-stream",
+    "content-type": "application/json",
+    "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+    "mcp-method": method,
+    ...(name === undefined ? {} : { "mcp-name": name }),
+    ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+  };
+}
 
   async restartApp(): Promise<void> {
     await this.stopApp();
