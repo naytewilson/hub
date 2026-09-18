@@ -25,6 +25,7 @@ import type { TriggerProvider } from "../triggers/index.js";
 import type { ExecutionAuthority } from "../execution-authority/index.js";
 import { OutputExecutorRegistry } from "../execution-capabilities/outputs.js";
 import { executionToolPolicy } from "../execution-capabilities/tool-policy.js";
+import { materializeDaemonMcpServers } from "../config/external-mcp.js";
 import {
   notifyAgentExecutionCompleted,
   notifyAgentExecutionFailed,
@@ -2007,6 +2008,7 @@ async function buildCreateAgentOptions(
     prompt: intent.prompt,
     env: buildAgentEnv(intent, materializedEnv),
     mcpServers: {
+      ...materializeDaemonMcpServers(intent.agent.mcpServers),
       hub: buildExecutionCapabilityMcpServer(hubExecutionEnv),
     },
     toolPolicy: executionToolPolicy({
