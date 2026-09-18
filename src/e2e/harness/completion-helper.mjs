@@ -2,6 +2,14 @@
 import { access, readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 
+const MCP_PROTOCOL_VERSION = "2026-07-28";
+const MCP_CLIENT_INFO = { name: "paseo-hub-e2e-completion", version: "1.0.0" };
+const MCP_META = {
+  "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+  "io.modelcontextprotocol/clientInfo": MCP_CLIENT_INFO,
+  "io.modelcontextprotocol/clientCapabilities": {},
+};
+
 const jobs = requiredEnvironment("HUB_E2E_COMPLETION_JOBS");
 const gate = requiredEnvironment("HUB_E2E_COMPLETE_GATE");
 let stopping = false;
@@ -22,13 +30,20 @@ for (;;) {
         headers: {
           "content-type": "application/json",
           accept: "application/json, text/event-stream",
+          "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+          "mcp-method": "tools/call",
+          "mcp-name": "finish_execution",
           ...Object.fromEntries(server.headers.map((header) => [header.name, header.value])),
         },
         body: JSON.stringify({
           jsonrpc: "2.0",
           id: 4,
           method: "tools/call",
-          params: { name: "finish_execution", arguments: {} },
+          params: {
+            name: "finish_execution",
+            arguments: {},
+            _meta: MCP_META,
+          },
         }),
       });
       process.stdout.write(`MCP finish ${file} status=${response.status}\n`);

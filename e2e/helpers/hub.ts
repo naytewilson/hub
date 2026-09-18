@@ -9,8 +9,7 @@ import {
   type Request,
 } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client as McpClient, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { WebSocket, type RawData } from "ws";
 import { z } from "zod";
 import { dump } from "js-yaml";
@@ -2536,14 +2535,14 @@ export class PaseoHub {
     daemon: ContractDaemon,
   ): Promise<void> {
     const capability = await daemon.executionCapability(executionId);
-    const client = new McpClient({ name: "paseo-hub-browser-contract", version: "1.0.0" });
+    const client = new McpClient(
+      { name: "paseo-hub-browser-contract", version: "1.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
     const transport = new StreamableHTTPClientTransport(new URL(capability.url), {
       requestInit: { headers: capability.headers },
     });
     try {
-      // The SDK's getter is typed `string | undefined` while its Transport interface uses an
-      // exact-optional `sessionId?: string`; the runtime class is the SDK's official transport.
-      // @ts-expect-error upstream SDK exactOptionalPropertyTypes mismatch
       await client.connect(transport);
       const result = await client.callTool({ name: "finish_execution", arguments: {} });
       expect(result.isError).toBeUndefined();
