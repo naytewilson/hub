@@ -83,10 +83,22 @@ export async function checkControlCapability(
 }
 
 function acknowledgementKind(effect: unknown): string | undefined {
-  if (typeof effect !== "object" || effect === null) return undefined;
-  const acknowledgement = Reflect.get(effect, "acknowledgement");
-  if (typeof acknowledgement !== "object" || acknowledgement === null) return undefined;
-  const kind = Reflect.get(acknowledgement, "kind");
+  if (
+    typeof effect !== "object" ||
+    effect === null ||
+    !("acknowledgement" in effect)
+  ) {
+    return undefined;
+  }
+  const acknowledgement = effect.acknowledgement;
+  if (
+    typeof acknowledgement !== "object" ||
+    acknowledgement === null ||
+    !("kind" in acknowledgement)
+  ) {
+    return undefined;
+  }
+  const kind = acknowledgement.kind;
   return typeof kind === "string" ? kind : undefined;
 }
 
@@ -115,14 +127,31 @@ function startRequestTarget(effect: unknown): {
   projectSlug: string;
   expectedVersionId: string | null;
 } | undefined {
-  if (typeof effect !== "object" || effect === null) return undefined;
-  const target = Reflect.get(effect, "requestTarget");
+  if (
+    typeof effect !== "object" ||
+    effect === null ||
+    !("requestTarget" in effect)
+  ) {
+    return undefined;
+  }
+  const target = effect.requestTarget;
   if (typeof target !== "object" || target === null) return undefined;
-  const trigger = Reflect.get(target, "trigger");
-  const projectSlug = Reflect.get(target, "projectSlug");
-  const expectedVersionId = Reflect.get(target, "expectedVersionId");
-  if (typeof trigger !== "string" || typeof projectSlug !== "string") return undefined;
-  if (expectedVersionId !== null && typeof expectedVersionId !== "string") return undefined;
+  if (
+    !("trigger" in target) ||
+    !("projectSlug" in target) ||
+    !("expectedVersionId" in target)
+  ) {
+    return undefined;
+  }
+  const trigger = target.trigger;
+  const projectSlug = target.projectSlug;
+  const expectedVersionId = target.expectedVersionId;
+  if (typeof trigger !== "string" || typeof projectSlug !== "string") {
+    return undefined;
+  }
+  if (expectedVersionId !== null && typeof expectedVersionId !== "string") {
+    return undefined;
+  }
   return { trigger, projectSlug, expectedVersionId };
 }
 
