@@ -34,6 +34,10 @@ import {
   toHubAcknowledgement,
   validateStartApprovedExecutionInput,
 } from "./control-operations.js";
+  CapabilityDeniedError,
+  ExecutionControlError,
+  hubCredentialPrincipal,
+} from "../execution-convergence/index.js";
 import { TriggerDocumentError } from "../triggers/configuration/index.js";
 
 export type * from "./types.js";
@@ -537,9 +541,99 @@ export function createPublicOperations(
         return { status: "listed", operations: records.map(toControlOperationWire) };
       } catch (error) {
         return storageUnavailableOrThrow(error);
+    async getExecution(_authorization, input) {
+      const convergence = capabilities.executionConvergence;
+      const authority = capabilities.roomAuthority;
+      if (convergence === undefined || authority === undefined) {
+        return { status: "execution_control_unavailable" };
+      }
+      try {
+        const description = await convergence.describeExecution(input.executionId);
+        // The read gate is the same durable room.read check as Room endpoints —
+        // observing one execution never escapes the capability boundary.
+        await authority.reader.readSnapshot(description.room_id);
+        return { status: "ok", ...description };
+      } catch (error) {
+        if (error instanceof RoomNotFoundError) return { status: "room_not_found" };
+        if (error instanceof RoomCapabilityDeniedError) {
+          return { status: "capability_denied" };
+        }
+        if (error instanceof CapabilityDeniedError) return { status: "capability_denied" };
+        if (error instanceof ExecutionControlError) {
+          // No authority binding → the authority plane does not know this
+          // execution; reads answer not_found, control answers not_bound.
+          return { status: "execution_not_found" };
+        }
+        return storageUnavailableOrThrow(error);
+      }
+    },
+    async mintExecutionGrant(authorization, input) {
+      const convergence = capabilities.executionConvergence;
+      if (convergence === undefined) return { status: "execution_control_unavailable" };
+      try {
+        const grant = await convergence.mintGrant({
+          executionId: input.executionId,
+          action: input.action,
+          principal: hubCredentialPrincipal(authorization.credentialId),
+          ttlSeconds: input.ttlSeconds ?? 300,
+        });
+        return { status: "minted", ...grant };
+      } catch (error) {
+        return executionControlErrorOrThrow(error);
+      }
+    },
+    async controlExecution(authorization, input) {
+      const convergence = capabilities.executionConvergence;
+      if (convergence === undefined) return { status: "execution_control_unavailable" };
+      try {
+        const outcome = await convergence.performAction({
+          executionId: input.executionId,
+          action: input.action,
+          grantId: input.grantId,
+          principal: hubCredentialPrincipal(authorization.credentialId),
+          ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
+        });
+        return { status: "applied", ...outcome };
+      } catch (error) {
+        return executionControlErrorOrThrow(error);
       }
     },
   };
+}
+
+/**
+ * I4 error mapping — `capability_denied` stays `capability_denied` (grant
+ * validation), never `insufficient_scope` (transport credential scope). The
+ * two are different trust boundaries and must never collapse on the wire.
+ */
+function executionControlErrorOrThrow(
+  error: unknown,
+):
+  | { status: "execution_not_found" }
+  | { status: "execution_not_bound" }
+  | { status: "capability_denied" }
+  | { status: "invalid_state" }
+  | { status: "room_not_active" }
+  | { status: "infrastructure_unavailable" } {
+  if (error instanceof CapabilityDeniedError || error instanceof RoomCapabilityDeniedError) {
+    return { status: "capability_denied" };
+  }
+  if (error instanceof RoomNotFoundError) return { status: "execution_not_found" };
+  if (error instanceof ExecutionControlError) {
+    switch (error.code) {
+      case "execution_not_found":
+        return { status: "execution_not_found" };
+      case "execution_not_bound":
+        return { status: "execution_not_bound" };
+      case "capability_denied":
+        return { status: "capability_denied" };
+      case "invalid_state":
+        return { status: "invalid_state" };
+      case "room_not_active":
+        return { status: "room_not_active" };
+    }
+  }
+  return storageUnavailableOrThrow(error);
 }
 
 /**

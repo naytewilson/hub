@@ -666,6 +666,9 @@ describe("generated public OpenAPI", () => {
       "/api/v1/controls/operations",
       "/api/v1/controls/operations/{operationId}",
       "/api/v1/daemons/enrollment-tokens",
+      "/api/v1/executions/{executionId}",
+      "/api/v1/executions/{executionId}/actions/{action}",
+      "/api/v1/executions/{executionId}/grants",
       "/api/v1/manual-runs",
       "/api/v1/projects",
       "/api/v1/rooms",
@@ -727,6 +730,18 @@ describe("generated public OpenAPI", () => {
       "/api/v1/controls/operations/{operationId}": [
         "controls:read",
         ["200", "400", "401", "403", "404", "500", "503"],
+      ],
+      "/api/v1/executions/{executionId}": [
+        "rooms:read",
+        ["200", "400", "401", "403", "404", "500", "503"],
+      ],
+      "/api/v1/executions/{executionId}/grants": [
+        "executions:control",
+        ["201", "400", "401", "403", "404", "409", "500", "503"],
+      ],
+      "/api/v1/executions/{executionId}/actions/{action}": [
+        "executions:control",
+        ["200", "400", "401", "403", "404", "409", "500", "503"],
       ],
     } as const;
     for (const [path, [scope, statuses]] of Object.entries(expectations)) {
@@ -994,6 +1009,43 @@ function successfulOperations(): PublicOperations {
       Promise.resolve({ status: "ok", operation: controlOperation("cancel") }),
     listControlOperations: () =>
       Promise.resolve({ status: "listed", operations: [controlOperation("cancel")] }),
+    getExecution: () =>
+      Promise.resolve({
+        status: "ok",
+        execution_id: "845e9d26-7977-45e1-bc69-d80a7b55a9cc",
+        room_id: "84af3583-23ff-4fcc-9838-ed3262499be2",
+        correlation_id: "f83dc934-02a0-4849-8de7-699110be24ed",
+        state: "running",
+        substate: "tool_wait",
+        last_transition: {
+          room_seq: 6,
+          event_id: "945e9d26-7977-45e1-bc69-d80a7b55a9cd",
+          occurred_at: "2026-09-19T11:30:00.000Z",
+          causation_id: "paseo:daemon-1:845e9d26-7977-45e1-bc69-d80a7b55a9cc:x",
+        },
+      }),
+    mintExecutionGrant: () =>
+      Promise.resolve({
+        status: "minted",
+        grant_id: "745e9d26-7977-45e1-bc69-d80a7b55a9cc",
+        execution_id: "845e9d26-7977-45e1-bc69-d80a7b55a9cc",
+        action: "pause",
+        principal: "device:hub-credential:credential-fake",
+        issued_at: "2026-09-19T12:00:00.000Z",
+        expires_at: "2026-09-19T12:05:00.000Z",
+        scope_hash: "abc123",
+      }),
+    controlExecution: () =>
+      Promise.resolve({
+        status: "applied",
+        execution_id: "845e9d26-7977-45e1-bc69-d80a7b55a9cc",
+        state: "paused",
+        substate: null,
+        room_seq: 7,
+        event_id: "a45e9d26-7977-45e1-bc69-d80a7b55a9ce",
+        duplicate: false,
+        effect_applied: true,
+      }),
   };
 }
 

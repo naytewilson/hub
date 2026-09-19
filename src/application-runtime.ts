@@ -29,6 +29,7 @@ import { TriggerDashboard } from "./triggers/dashboard.js";
 import type { ProviderApplications } from "./provider-applications/index.js";
 import { DaemonProviderCatalog } from "./daemons/provider-catalog.js";
 import type { RoomAuthoritySource } from "./room-projection/index.js";
+import type { ExecutionAuthorityWriteSource } from "./execution-convergence/index.js";
 
 export interface ApplicationCompositionOptions {
   database: Database | null;
@@ -44,6 +45,8 @@ export interface ApplicationCompositionOptions {
   testTriggerRoutes?: boolean;
   daemonConnectionForId?: DaemonDispatchLifecycleOptions["connectionForDaemon"];
   roomAuthority?: RoomAuthoritySource;
+  /** I3/I4: explicit ANVIL authority write seam (opt-in; never implied by the read envs). */
+  anvilWriteSource?: ExecutionAuthorityWriteSource;
   close(): Promise<void>;
 }
 
@@ -77,6 +80,9 @@ function hubApplicationOptions(
       ? {}
       : { daemonConnectionForId: options.daemonConnectionForId }),
     ...(options.roomAuthority === undefined ? {} : { roomAuthority: options.roomAuthority }),
+    ...(options.anvilWriteSource === undefined
+      ? {}
+      : { anvilWriteSource: options.anvilWriteSource }),
   };
 }
 

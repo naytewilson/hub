@@ -49,6 +49,7 @@ import { composeEmailDelivery } from "./email/index.js";
 import { createAccountMailer } from "./auth/account-emails.js";
 import { migrateLegacyProjectTriggers } from "./triggers/migration.js";
 import { roomAuthorityFromEnvironment } from "./room-projection/index.js";
+import { executionAuthorityFromEnvironment } from "./execution-convergence/index.js";
 
 export function startProductionRuntime(): Promise<ApplicationRuntime> {
   return startApplication(createProductionRuntime);
@@ -158,6 +159,11 @@ async function createProductionRuntime(): Promise<ApplicationRuntime> {
       resources.own(() => roomAuthority.close());
       logger.info("anvil room projection seam configured");
     }
+    const anvilWriteSource = executionAuthorityFromEnvironment(process.env);
+    if (anvilWriteSource !== undefined) {
+      resources.own(() => anvilWriteSource.close());
+      logger.info("anvil execution-convergence write seam configured");
+    }
     const application = await createApplicationRuntime({
       database,
       auth,
@@ -169,6 +175,7 @@ async function createProductionRuntime(): Promise<ApplicationRuntime> {
       completionTokenSecret: identity.authSecret,
       close: () => resources.close(),
       ...(roomAuthority === undefined ? {} : { roomAuthority }),
+      ...(anvilWriteSource === undefined ? {} : { anvilWriteSource }),
     });
     const activationFailures = await activateProviderApplicationsAtStartup({
       store: providerStore,

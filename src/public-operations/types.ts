@@ -17,6 +17,11 @@ import type {
   ProjectedRoomParticipant,
   RoomAuthoritySource,
 } from "../room-projection/index.js";
+import type {
+  ExecutionConvergence,
+  ExecutionState,
+  ExecutionSubstate,
+} from "../execution-convergence/index.js";
 
 export interface PublicAuthorization {
   kind: "apiKey" | "cliCredential";
@@ -231,6 +236,94 @@ export type ReplayRoomEventsResult =
   | { status: "room_projection_unavailable" }
   | InfrastructureUnavailable;
 
+// --- I4 capability-scoped execution control (wire vocabulary is snake_case:
+// every identity here is authority-minted and passed through unchanged) ---
+
+export type ExecutionControlAction =
+  | "start"
+  | "pause"
+  | "resume"
+  | "cancel"
+  | "retry"
+  | "acknowledge";
+
+export interface GetExecutionInput {
+  executionId: string;
+}
+
+export interface MintExecutionGrantOperationInput {
+  executionId: string;
+  action: ExecutionControlAction;
+  ttlSeconds?: number | undefined;
+}
+
+export interface ControlExecutionOperationInput {
+  executionId: string;
+  action: ExecutionControlAction;
+  grantId: string;
+  requestId?: string | undefined;
+}
+
+export type GetExecutionResult =
+  | {
+      status: "ok";
+      execution_id: string;
+      room_id: string;
+      correlation_id: string;
+      state: ExecutionState;
+      substate: ExecutionSubstate | null;
+      last_transition: {
+        room_seq: number;
+        event_id: string;
+        occurred_at: string | null;
+        causation_id: string | null;
+      } | null;
+    }
+  | { status: "execution_not_found" }
+  | { status: "capability_denied" }
+  | { status: "room_not_found" }
+  | { status: "execution_control_unavailable" }
+  | InfrastructureUnavailable;
+
+export type MintExecutionGrantResult =
+  | {
+      status: "minted";
+      grant_id: string;
+      execution_id: string;
+      action: ExecutionControlAction;
+      principal: string;
+      issued_at: string;
+      expires_at: string;
+      scope_hash: string;
+    }
+  | { status: "execution_not_found" }
+  | { status: "execution_not_bound" }
+  | { status: "capability_denied" }
+  | { status: "invalid_state" }
+  | { status: "room_not_active" }
+  | { status: "execution_control_unavailable" }
+  | InfrastructureUnavailable;
+
+export type ControlExecutionOperationResult =
+  | {
+      status: "applied";
+      execution_id: string;
+      state: ExecutionState;
+      substate: ExecutionSubstate | null;
+      room_seq: number;
+      event_id: string;
+      duplicate: boolean;
+      effect_applied: boolean;
+      retry_execution_id?: string;
+    }
+  | { status: "execution_not_found" }
+  | { status: "execution_not_bound" }
+  | { status: "capability_denied" }
+  | { status: "invalid_state" }
+  | { status: "room_not_active" }
+  | { status: "execution_control_unavailable" }
+  | InfrastructureUnavailable;
+
 export interface PublicOperations {
   listTriggers(authorization: PublicAuthorization): Promise<ListTriggersResult>;
   validateTrigger(
@@ -297,6 +390,18 @@ export interface PublicOperations {
     authorization: PublicAuthorization,
     input: ListControlOperationsInput,
   ): Promise<ListControlOperationsResult>;
+  getExecution(
+    authorization: PublicAuthorization,
+    input: GetExecutionInput,
+  ): Promise<GetExecutionResult>;
+  mintExecutionGrant(
+    authorization: PublicAuthorization,
+    input: MintExecutionGrantOperationInput,
+  ): Promise<MintExecutionGrantResult>;
+  controlExecution(
+    authorization: PublicAuthorization,
+    input: ControlExecutionOperationInput,
+  ): Promise<ControlExecutionOperationResult>;
 }
 
 export interface PublicOperationRepository {
@@ -403,6 +508,12 @@ export interface PublicOperationCapabilities {
    * rather than serving unauthenticated or partially projected state.
    */
   roomAuthority?: RoomAuthoritySource;
+  /**
+   * The I3/I4 convergence machine — the authority write seam. Absent when the
+   * instance is not configured for execution control; operations then answer
+   * `execution_control_unavailable` rather than minting or acting unchecked.
+   */
+  executionConvergence?: ExecutionConvergence;
 }
 
 // ---------------------------------------------------------------------------
