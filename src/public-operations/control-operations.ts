@@ -110,6 +110,48 @@ export function replayOrConflict(
   return { status: "idempotency_key_conflict", existingOperationId: existing.id };
 }
 
+function startRequestTarget(effect: unknown): {
+  trigger: string;
+  projectSlug: string;
+  expectedVersionId: string | null;
+} | undefined {
+  if (typeof effect !== "object" || effect === null) return undefined;
+  const target = (effect as Record<string, unknown>)["requestTarget"];
+  if (typeof target !== "object" || target === null) return undefined;
+  const value = target as Record<string, unknown>;
+  if (typeof value["trigger"] !== "string" || typeof value["projectSlug"] !== "string") {
+    return undefined;
+  }
+  const expectedVersionId = value["expectedVersionId"];
+  if (expectedVersionId !== null && typeof expectedVersionId !== "string") return undefined;
+  return {
+    trigger: value["trigger"],
+    projectSlug: value["projectSlug"],
+    expectedVersionId,
+  };
+}
+
+export function replayStartOrConflict(
+  existing: ControlOperationRecord,
+  input: StartApprovedExecutionInput,
+): Extract<ControlExecutionResult, { status: "replayed" | "idempotency_key_conflict" }> {
+  const target = startRequestTarget(existing.effect);
+  const sameTarget =
+    existing.op === "execution_start" &&
+    existing.executionId === null &&
+    target !== undefined &&
+    target.trigger === input.trigger &&
+    target.projectSlug === input.projectSlug &&
+    target.expectedVersionId === (input.expectedVersionId ?? null);
+  if (sameTarget) {
+    return {
+      status: "replayed",
+      operation: { ...toControlOperationWire(existing), replayed: true as const },
+    };
+  }
+  return { status: "idempotency_key_conflict", existingOperationId: existing.id };
+}
+
 export interface ControlOperationExecutor {
   repository: PublicOperationRepository;
   capabilities: PublicOperationCapabilities;
