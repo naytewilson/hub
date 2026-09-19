@@ -120,6 +120,16 @@ export async function invokeControlOperation(
   const issues = validateControlInput(input);
   if (issues.length > 0) return { status: "invalid_input", issues };
 
+  // Frozen V1 contract ordering: replay/conflict resolution precedes the
+  // ANVIL capability check. A stored result exercises no new authority and
+  // therefore remains replayable after the original grant expires/revokes.
+  // The unique (organization_id, idempotency_key) constraint remains the
+  // race backstop for concurrent duplicates.
+  const prior = await repository.findControlOperationByKey(organizationId, input.idempotencyKey);
+  if (prior !== undefined) {
+    return replayOrConflict(prior, op, input.executionId);
+  }
+
   const authority = resolveControlAuthority(capabilities);
   if (authority === undefined) return { status: "control_plane_unavailable" };
 
@@ -132,14 +142,6 @@ export async function invokeControlOperation(
     input.executionId === undefined
       ? undefined
       : await repository.findAgentExecution(organizationId, input.executionId);
-
-  // Idempotency first: a replayed key returns the stored operation without
-  // re-executing any effect. The unique (organization_id, idempotency_key)
-  // constraint remains the race backstop for concurrent duplicates.
-  const prior = await repository.findControlOperationByKey(organizationId, input.idempotencyKey);
-  if (prior !== undefined) {
-    return replayOrConflict(prior, op, input.executionId);
-  }
 
   const outcome = await execute(target);
   if (outcome.status === "replay_stored") {
