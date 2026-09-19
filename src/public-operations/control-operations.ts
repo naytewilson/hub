@@ -84,9 +84,9 @@ export async function checkControlCapability(
 
 function acknowledgementKind(effect: unknown): string | undefined {
   if (typeof effect !== "object" || effect === null) return undefined;
-  const acknowledgement = (effect as Record<string, unknown>)["acknowledgement"];
+  const acknowledgement = Reflect.get(effect, "acknowledgement");
   if (typeof acknowledgement !== "object" || acknowledgement === null) return undefined;
-  const kind = (acknowledgement as Record<string, unknown>)["kind"];
+  const kind = Reflect.get(acknowledgement, "kind");
   return typeof kind === "string" ? kind : undefined;
 }
 
@@ -116,19 +116,14 @@ function startRequestTarget(effect: unknown): {
   expectedVersionId: string | null;
 } | undefined {
   if (typeof effect !== "object" || effect === null) return undefined;
-  const target = (effect as Record<string, unknown>)["requestTarget"];
+  const target = Reflect.get(effect, "requestTarget");
   if (typeof target !== "object" || target === null) return undefined;
-  const value = target as Record<string, unknown>;
-  if (typeof value["trigger"] !== "string" || typeof value["projectSlug"] !== "string") {
-    return undefined;
-  }
-  const expectedVersionId = value["expectedVersionId"];
+  const trigger = Reflect.get(target, "trigger");
+  const projectSlug = Reflect.get(target, "projectSlug");
+  const expectedVersionId = Reflect.get(target, "expectedVersionId");
+  if (typeof trigger !== "string" || typeof projectSlug !== "string") return undefined;
   if (expectedVersionId !== null && typeof expectedVersionId !== "string") return undefined;
-  return {
-    trigger: value["trigger"],
-    projectSlug: value["projectSlug"],
-    expectedVersionId,
-  };
+  return { trigger, projectSlug, expectedVersionId };
 }
 
 export function replayStartOrConflict(
@@ -181,7 +176,10 @@ export async function invokeControlOperation(
   // check. Replaying an operation that already executed under valid authority
   // exercises no new authority and must continue to work when the authority
   // seam is temporarily unavailable or the original grant later expires.
-  const prior = await repository.findControlOperationByKey(organizationId, input.idempotencyKey);
+  const prior = await repository.findControlOperationByKey(
+    organizationId,
+    input.idempotencyKey,
+  );
   if (prior !== undefined) {
     return replayOrConflict(prior, op, input);
   }
