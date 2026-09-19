@@ -435,19 +435,22 @@ export function createPublicOperations(
       try {
         const issues = validateStartApprovedExecutionInput(input);
         if (issues.length > 0) return { status: "invalid_input", issues };
-        const authority = resolveControlAuthority(capabilities);
-        if (authority === undefined) return { status: "control_plane_unavailable" };
-        const check = await checkControlCapability(authority, "execution_start");
-        if (!check.allowed) {
-          return { status: "control_capability_denied", capability: check.capability };
-        }
         const organizationId = authorization.organizationId;
+        // Frozen V1 replay law applies to approved-start too: an existing
+        // idempotency result is replayed (or conflicts) before consulting the
+        // current ANVIL grant, because replay exercises no new authority.
         const existing = await repository.findControlOperationByKey(
           organizationId,
           input.idempotencyKey,
         );
         if (existing !== undefined) {
           return replayOrConflict(existing, "execution_start", undefined);
+        }
+        const authority = resolveControlAuthority(capabilities);
+        if (authority === undefined) return { status: "control_plane_unavailable" };
+        const check = await checkControlCapability(authority, "execution_start");
+        if (!check.allowed) {
+          return { status: "control_capability_denied", capability: check.capability };
         }
         const project = await repository.resolveManualRunProject(
           organizationId,
