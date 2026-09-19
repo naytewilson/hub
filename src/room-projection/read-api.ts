@@ -209,6 +209,23 @@ export function createNeoReadApiReader(options: NeoReadApiOptions): RoomAuthorit
         observed_at: readObservedAt(wire.observed_at),
       };
     },
+
+    subjectLabel(): string {
+      return subjectLabel;
+    },
+
+    /**
+     * The read contract (room_list/room_snapshot/room_events) has no
+     * capability-check tool — grants are enforced Neo-side per call, not
+     * introspectable Hub-side. Answering here would require inventing a wire
+     * surface; fail closed instead (callers see infrastructure_unavailable,
+     * never a fabricated allow or deny).
+     */
+    holdsCapability(): Promise<boolean> {
+      return Promise.reject(
+        new DatabaseUnavailableError("neo room read api cannot evaluate capability checks"),
+      );
+    },
   };
 }
 

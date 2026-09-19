@@ -217,5 +217,12 @@ function unusedRepository(): PublicOperationRepository {
     resolveDeploymentProject: unused,
     findManualRun: unused,
     issueEnrollmentToken: unused,
+    findAgentExecution: unused,
+    requestExecutionHubAction: unused,
+    recordExecutionHubAcknowledgement: unused,
+    insertControlOperation: unused,
+    findControlOperationById: unused,
+    findControlOperationByKey: unused,
+    listControlOperations: unused,
   };
 }

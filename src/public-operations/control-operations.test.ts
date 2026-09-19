@@ -248,6 +248,7 @@ function makeAuthority(grants: ReadonlySet<string>): RoomAuthoritySource {
       readSnapshot: unimplemented,
       replayEvents: unimplemented,
     },
+    staleAfterMs: 60_000,
     close: () => Promise.resolve(),
   };
 }

@@ -34,6 +34,7 @@ import {
   toHubAcknowledgement,
   validateStartApprovedExecutionInput,
 } from "./control-operations.js";
+import {
   CapabilityDeniedError,
   ExecutionControlError,
   hubCredentialPrincipal,
@@ -541,6 +542,8 @@ export function createPublicOperations(
         return { status: "listed", operations: records.map(toControlOperationWire) };
       } catch (error) {
         return storageUnavailableOrThrow(error);
+      }
+    },
     async getExecution(_authorization, input) {
       const convergence = capabilities.executionConvergence;
       const authority = capabilities.roomAuthority;
