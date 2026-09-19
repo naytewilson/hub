@@ -1,11 +1,11 @@
 /**
  * I4 Hub Control Contract V1 — shared control-operation executor.
  *
- * Every control op runs the same spine: idempotency-key validation → ANVIL
- * capability check (server-side, durable, against the parallel ownership-map
- * contract — NEVER a transport scope) → per-op effect → durable idempotent
- * record in `control_operations`. Replays return the STORED operation with
- * `replayed: true`; a different op under an already-used key is a 409.
+ * Every control op runs the frozen V1 spine: idempotency-key validation →
+ * stored-key replay/conflict → ANVIL capability check for NEW effects →
+ * target/precondition → durable effect + operation record. Replays return the
+ * STORED operation with `replayed: true` and exercise no new authority; a
+ * different op/target under an already-used key is a 409.
  */
 import type {
   AgentExecutionHubAcknowledgementInput,
@@ -120,6 +120,15 @@ export async function invokeControlOperation(
   const issues = validateControlInput(input);
   if (issues.length > 0) return { status: "invalid_input", issues };
 
+  // Frozen V1 replay is authority-free: a completed operation already
+  // exercised authority, so the same key/target must replay even if the
+  // capability is later revoked or the ANVIL projection is temporarily
+  // unavailable. A different op/target under the key still conflicts.
+  const prior = await repository.findControlOperationByKey(organizationId, input.idempotencyKey);
+  if (prior !== undefined) {
+    return replayOrConflict(prior, op, input.executionId);
+  }
+
   const authority = resolveControlAuthority(capabilities);
   if (authority === undefined) return { status: "control_plane_unavailable" };
 
@@ -132,14 +141,6 @@ export async function invokeControlOperation(
     input.executionId === undefined
       ? undefined
       : await repository.findAgentExecution(organizationId, input.executionId);
-
-  // Idempotency first: a replayed key returns the stored operation without
-  // re-executing any effect. The unique (organization_id, idempotency_key)
-  // constraint remains the race backstop for concurrent duplicates.
-  const prior = await repository.findControlOperationByKey(organizationId, input.idempotencyKey);
-  if (prior !== undefined) {
-    return replayOrConflict(prior, op, input.executionId);
-  }
 
   const outcome = await execute(target);
   if (outcome.status === "replay_stored") {
