@@ -29,7 +29,6 @@ import {
 import {
   checkControlCapability,
   invokeControlOperation,
-  replayOrConflict,
   replayStartOrConflict,
   resolveControlAuthority,
   toHubAcknowledgement,
