@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import type { OperationAuthenticator } from "../auth/operation-auth.js";
 import { isDatabaseUnavailableError } from "../db/errors.js";
 import { reportFailure } from "../failures/index.js";
 import type {
+  ControlExecutionResult,
   DispatchManualRunResult,
+  GetControlOperationResult,
   GetRoomSnapshotResult,
   InstallConfigurationResult,
   InstallTriggerResult,
   IssueEnrollmentTokenResult,
+  ListControlOperationsResult,
   ListProjectsResult,
   ListRoomsResult,
   ListTriggersResult,
@@ -16,10 +20,13 @@ import type {
   PublicAuthorization,
   PublicOperations,
   ReplayRoomEventsResult,
+  StartApprovedExecutionResult,
   ValidateConfigurationResult,
   ValidateTriggerResult,
 } from "../public-operations/index.js";
 import {
+  ControlOperationListSchema,
+  ControlOperationResponseSchema,
   DispatchedManualRunSchema,
   EnrollmentTokenSchema,
   InstalledConfigurationSchema,
@@ -59,7 +66,11 @@ type PublicOperationResult =
   | IssueEnrollmentTokenResult
   | ListRoomsResult
   | GetRoomSnapshotResult
-  | ReplayRoomEventsResult;
+  | ReplayRoomEventsResult
+  | ControlExecutionResult
+  | StartApprovedExecutionResult
+  | GetControlOperationResult
+  | ListControlOperationsResult;
 
 export interface PublicApi {
   handle(request: Request): Promise<Response>;
@@ -252,6 +263,7 @@ async function execute(
   }
   const access: PublicAuthorization = authorization.access;
   let input: unknown;
+  let bodyInput: Record<string, unknown> | undefined;
   if (definition.requestSchema !== undefined) {
     const parsedBody = await readJson(request);
     if (!parsedBody.success) {
@@ -268,6 +280,12 @@ async function execute(
       return validationProblem(requestId, parsed.error.issues);
     }
     input = parsed.data;
+    if (typeof parsed.data === "object" && parsed.data !== null) {
+      const record = z.record(z.string(), z.unknown()).safeParse(parsed.data);
+      if (record.success) {
+        bodyInput = record.data;
+      }
+    }
   }
   if (definition.routeSchema !== undefined) {
     const url = new URL(request.url);
@@ -280,7 +298,15 @@ async function execute(
     if (!parsed.success) {
       return validationProblem(requestId, parsed.error.issues);
     }
-    input = parsed.data;
+    // When a mutating op carries both a JSON body and path parameters, the
+    // invoke callback receives the merged object (body fields win on
+    // collision; existing op surfaces never set both schemas).
+    let merged: unknown = parsed.data;
+    const routeRecord = z.record(z.string(), z.unknown()).safeParse(parsed.data);
+    if (bodyInput !== undefined && routeRecord.success) {
+      merged = { ...routeRecord.data, ...bodyInput };
+    }
+    input = merged;
   }
   const result = await definition.invoke(operations, access, input);
   if (definition.resultMapping === "triggers") {
@@ -332,6 +358,10 @@ const RESULT_RESPONDERS: Record<
     roomSnapshotResponse(requestId, requireResult(isRoomSnapshotResult, result, "room snapshot")),
   "room-events": (requestId, result) =>
     roomEventsResponse(requestId, requireResult(isRoomEventsResult, result, "room events")),
+  control: (requestId, result) =>
+    controlResponse(requestId, requireResult(isControlResult, result, "control")),
+  "control-list": (requestId, result) =>
+    controlListResponse(requestId, requireResult(isControlListResult, result, "control list")),
 };
 
 function requireResult<Narrowed extends PublicOperationResult>(
@@ -424,6 +454,125 @@ function capabilityDeniedProblem(requestId: string): Response {
     "Room capability denied",
     "The Hub instance's bound ANVIL subject lacks a durable room.read grant on this Room.",
   );
+}
+
+/** I4 Hub Control Contract V1 — one control op response (mutating ops and get). */
+function controlResponse(
+  requestId: string,
+  result: ControlExecutionResult | StartApprovedExecutionResult | GetControlOperationResult,
+): Response {
+  switch (result.status) {
+    case "applied":
+      // Contract V1: execution_start creates a dispatch (201); every other
+      // applied op is an effect on an existing resource (200).
+      return success(
+        requestId,
+        result.operation.op === "execution_start" ? 201 : 200,
+        ControlOperationResponseSchema,
+        { operation: result.operation },
+      );
+    case "recorded":
+      return success(requestId, 202, ControlOperationResponseSchema, {
+        operation: result.operation,
+      });
+    case "replayed":
+      return success(requestId, 200, ControlOperationResponseSchema, {
+        operation: result.operation,
+      });
+    case "ok":
+      return success(requestId, 200, ControlOperationResponseSchema, {
+        operation: result.operation,
+      });
+    case "invalid_input":
+      return validationProblem(requestId, result.issues);
+    case "execution_not_found":
+      return problem(
+        requestId,
+        404,
+        "execution_not_found",
+        "Execution not found",
+        "No agent execution with that id exists in this organization.",
+      );
+    case "control_capability_denied":
+      return problem(
+        requestId,
+        403,
+        "control_capability_denied",
+        "Control capability denied",
+        `The Hub instance's bound ANVIL subject lacks a durable global ${result.capability} grant.`,
+      );
+    case "control_precondition_failed":
+      return problem(
+        requestId,
+        409,
+        "control_precondition_failed",
+        "Control precondition failed",
+        `The control operation could not be recorded or applied: ${result.reason}.`,
+      );
+    case "idempotency_key_conflict":
+      return problem(
+        requestId,
+        409,
+        "idempotency_key_conflict",
+        "Idempotency key conflict",
+        `This idempotency key was already used for a different control operation (${result.existingOperationId}). Use a fresh key.`,
+      );
+    case "control_plane_unavailable":
+      return problem(
+        requestId,
+        503,
+        "control_plane_unavailable",
+        "Control plane unavailable",
+        "This Hub instance is not configured with the ANVIL authority seam that authorizes control operations.",
+      );
+    case "control_operation_not_found":
+      return problem(
+        requestId,
+        404,
+        "control_operation_not_found",
+        "Control operation not found",
+        "No recorded control operation with that id exists in this organization.",
+      );
+    case "project_not_found":
+      return problem(
+        requestId,
+        404,
+        "project_not_found",
+        "Project not found",
+        "No active project with that slug exists in this organization.",
+      );
+    case "trigger_not_found":
+      return problem(
+        requestId,
+        404,
+        "trigger_not_found",
+        "Trigger not found",
+        "No enabled manual trigger with that name exists for the project.",
+      );
+    case "infrastructure_unavailable":
+      return infrastructureProblem(requestId);
+  }
+  return assertNever(result);
+}
+
+function controlListResponse(requestId: string, result: ListControlOperationsResult): Response {
+  switch (result.status) {
+    case "listed":
+      return success(requestId, 200, ControlOperationListSchema, {
+        operations: result.operations,
+      });
+    case "control_plane_unavailable":
+      return problem(
+        requestId,
+        503,
+        "control_plane_unavailable",
+        "Control plane unavailable",
+        "This Hub instance is not configured with the ANVIL authority seam that authorizes control operations.",
+      );
+    case "infrastructure_unavailable":
+      return infrastructureProblem(requestId);
+  }
+  return assertNever(result);
 }
 
 function roomProjectionUnavailableProblem(requestId: string): Response {
@@ -889,6 +1038,35 @@ function isRoomEventsResult(result: PublicOperationResult): result is ReplayRoom
     result.status === "room_not_found" ||
     result.status === "capability_denied" ||
     (result.status === "ok" && "events" in result && "next_cursor" in result)
+  );
+}
+
+function isControlResult(
+  result: PublicOperationResult,
+): result is ControlExecutionResult | StartApprovedExecutionResult | GetControlOperationResult {
+  return (
+    result.status === "infrastructure_unavailable" ||
+    result.status === "applied" ||
+    result.status === "recorded" ||
+    result.status === "replayed" ||
+    result.status === "ok" ||
+    result.status === "invalid_input" ||
+    result.status === "execution_not_found" ||
+    result.status === "control_capability_denied" ||
+    result.status === "control_precondition_failed" ||
+    result.status === "idempotency_key_conflict" ||
+    result.status === "control_plane_unavailable" ||
+    result.status === "control_operation_not_found" ||
+    result.status === "project_not_found" ||
+    result.status === "trigger_not_found"
+  );
+}
+
+function isControlListResult(result: PublicOperationResult): result is ListControlOperationsResult {
+  return (
+    result.status === "infrastructure_unavailable" ||
+    result.status === "control_plane_unavailable" ||
+    (result.status === "listed" && "operations" in result)
   );
 }
 

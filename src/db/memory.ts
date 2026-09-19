@@ -8,9 +8,12 @@ import type {
   AgentExecutionOutputAttempt,
   AgentExecutionHubAcknowledgementInput,
   AgentExecutionHubAcknowledgements,
+  ControlOperationRecord,
   Database,
   InsertAgentExecutionInput,
+  InsertControlOperationInput,
   InsertMachineInput,
+  ListControlOperationsFilter,
   MachineRecord,
   TerminateMachineFields,
   TransitionAgentExecutionFields,
@@ -158,6 +161,8 @@ class MemoryDatabase implements Database {
   private readonly providerEventReceiptIdsBySignature = new Map<string, string>();
   private readonly machines = new Map<string, MachineRecord>();
   private readonly agentExecutions = new Map<string, AgentExecutionRecord>();
+  private readonly controlOperations = new Map<string, ControlOperationRecord>();
+  private readonly controlOperationIdsByKey = new Map<string, string>();
   private readonly triggerRuns = new Map<string, TriggerRunRecord>();
   private readonly triggerRunIdsByProviderEventReceipt = new Map<
     string,
@@ -1970,6 +1975,91 @@ class MemoryDatabase implements Database {
       hubActionCompletedAt: new Date(),
     });
     return true;
+  }
+
+  async requestAgentExecutionHubAction(
+    executionId: string,
+    action: "interrupt" | "archive",
+  ): Promise<AgentExecutionRecord | undefined> {
+    const execution = this.agentExecutions.get(executionId);
+    if (execution === undefined) return undefined;
+    if (execution.status !== "spawning" && execution.status !== "running") return undefined;
+    // I4 cancel requires NO pending action: any hub_action (even a different
+    // one) is a precondition failure, so the interrupt signal can never
+    // silently clobber a pending daemon action.
+    if (execution.hubAction !== null) return undefined;
+    const updated: AgentExecutionRecord = {
+      ...execution,
+      hubAction: action,
+      hubActionReadyAt: null,
+      hubActionCompletedAt: null,
+    };
+    this.agentExecutions.set(executionId, updated);
+    return updated;
+  }
+
+  async insertControlOperation(
+    input: InsertControlOperationInput,
+  ): Promise<{ inserted: boolean; record: ControlOperationRecord }> {
+    const key = `${input.organizationId}:${input.idempotencyKey}`;
+    const existingId = this.controlOperationIdsByKey.get(key);
+    if (existingId !== undefined) {
+      const existing = this.controlOperations.get(existingId);
+      if (existing === undefined) throw new Error("control operation conflict row missing");
+      return { inserted: false, record: existing };
+    }
+    const now = new Date();
+    const record: ControlOperationRecord = {
+      id: randomUUID(),
+      organizationId: input.organizationId,
+      op: input.op,
+      status: input.status,
+      idempotencyKey: input.idempotencyKey,
+      executionId: input.executionId ?? null,
+      capability: input.capability,
+      subject: input.subject,
+      correlationId: input.correlationId ?? null,
+      effect: input.effect,
+      response: input.response,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.controlOperations.set(record.id, record);
+    this.controlOperationIdsByKey.set(key, record.id);
+    return { inserted: true, record };
+  }
+
+  async findControlOperationByKey(
+    organizationId: string,
+    idempotencyKey: string,
+  ): Promise<ControlOperationRecord | undefined> {
+    const id = this.controlOperationIdsByKey.get(`${organizationId}:${idempotencyKey}`);
+    if (id === undefined) return undefined;
+    return this.controlOperations.get(id);
+  }
+
+  async findControlOperationById(
+    organizationId: string,
+    id: string,
+  ): Promise<ControlOperationRecord | undefined> {
+    const record = this.controlOperations.get(id);
+    return record?.organizationId === organizationId ? record : undefined;
+  }
+
+  async listControlOperations(
+    organizationId: string,
+    filter: ListControlOperationsFilter,
+  ): Promise<ControlOperationRecord[]> {
+    const limit = Math.min(Math.max(filter.limit, 1), 200);
+    return Array.from(this.controlOperations.values())
+      .filter((record) => record.organizationId === organizationId)
+      .filter(
+        (record) => filter.executionId === undefined || record.executionId === filter.executionId,
+      )
+      .filter((record) => filter.op === undefined || record.op === filter.op)
+      .filter((record) => filter.status === undefined || record.status === filter.status)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : -1))
+      .slice(0, limit);
   }
 
   async createProject(input: CreateProjectInput): Promise<ProjectRecord> {

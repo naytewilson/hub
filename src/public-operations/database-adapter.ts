@@ -88,6 +88,33 @@ export function createDatabasePublicOperationRepository(
       });
       return issued ? "issued" : "credential_revoked";
     },
+    // --- I4 control plane (Hub Control Contract V1) ---
+    async findAgentExecution(organizationId, executionId) {
+      const execution = await database.findAgentExecutionById(executionId);
+      return execution?.organizationId === organizationId ? execution : undefined;
+    },
+    async requestExecutionHubAction(organizationId, executionId, action) {
+      const execution = await database.findAgentExecutionById(executionId);
+      if (execution?.organizationId !== organizationId) return undefined;
+      return database.requestAgentExecutionHubAction(executionId, action);
+    },
+    async recordExecutionHubAcknowledgement(organizationId, executionId, acknowledgement) {
+      const execution = await database.findAgentExecutionById(executionId);
+      if (execution?.organizationId !== organizationId) return undefined;
+      return database.recordAgentExecutionHubAcknowledgement(executionId, acknowledgement);
+    },
+    async insertControlOperation(input) {
+      return database.insertControlOperation(input);
+    },
+    async findControlOperationById(organizationId, id) {
+      return database.findControlOperationById(organizationId, id);
+    },
+    async findControlOperationByKey(organizationId, idempotencyKey) {
+      return database.findControlOperationByKey(organizationId, idempotencyKey);
+    },
+    async listControlOperations(organizationId, filter) {
+      return database.listControlOperations(organizationId, filter);
+    },
   };
 }
 

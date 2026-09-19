@@ -110,6 +110,21 @@ export interface RoomAuthorityReader {
    * collapse on (room_id, room_seq) so projection stays idempotent.
    */
   replayEvents(roomPublicId: string, after: number, limit: number): Promise<RoomEventPage>;
+  /**
+   * Durable capability check for the bound subject: an unrevoked, unexpired
+   * grant for `capability`. With a null room scope only global grants satisfy
+   * the check (I4 V1 control capabilities are global-scoped); with a room
+   * public id, global or that room's grant satisfies it. Mirrors the H1
+   * `room.read` predicate exactly — Hub is outside the authority plane, so the
+   * grant table is always consulted.
+   */
+  holdsCapability(capability: string, scopeRoomPublicId: string | null): Promise<boolean>;
+  /**
+   * The bound ANVIL subject's producer-form label (`agent:<public_id>` or the
+   * device/user `subject_ref`) — the identity every capability check above is
+   * evaluated against. Recorded as the authorizing subject on control ops.
+   */
+  subjectLabel(): string;
 }
 
 export function createRoomAuthorityReader(
@@ -145,15 +160,16 @@ export function createRoomAuthorityReader(
    * Mirrors C2 `actorHolds` exactly: agents match `subject_agent_id` (after
    * resolving public_id → internal id), device/user match `subject_ref` in
    * producer form. No ambient authority short-circuit — Hub is outside the
-   * authority plane, so the grant table is always consulted.
+   * authority plane, so the grant table is always consulted. A null
+   * roomInternalId means "global scope only" (I4 V1 control capabilities).
    */
-  async function subjectHoldsRead(roomInternalId: number): Promise<boolean> {
+  async function subjectHoldsCapability(
+    capability: string,
+    roomInternalId: number | null,
+  ): Promise<boolean> {
     if (subject.kind === "agent") {
-      const agents = await query<IdRow>(`SELECT id FROM anvil.agents WHERE public_id = $1`, [
-        subject.publicId,
-      ]);
-      const agent = agents[0];
-      if (agent === undefined) return false;
+      const agentId = await agentInternalId();
+      if (agentId === undefined) return false;
       const rows = await query(
         `SELECT 1 FROM anvil.capability_grants
          WHERE subject_kind = 'agent'
@@ -161,9 +177,9 @@ export function createRoomAuthorityReader(
            AND capability = $2
            AND revoked_at IS NULL
            AND (expires_at IS NULL OR expires_at > now())
-           AND (scope_kind = 'global' OR scope_room_id = $3)
+           AND (scope_kind = 'global' OR ($3::bigint IS NOT NULL AND scope_room_id = $3))
          LIMIT 1`,
-        [toInt(agent.id), ROOM_READ_CAPABILITY, roomInternalId],
+        [agentId, capability, roomInternalId],
       );
       return rows.length > 0;
     }
@@ -174,11 +190,15 @@ export function createRoomAuthorityReader(
          AND capability = $3
          AND revoked_at IS NULL
          AND (expires_at IS NULL OR expires_at > now())
-         AND (scope_kind = 'global' OR scope_room_id = $4)
+         AND (scope_kind = 'global' OR ($4::bigint IS NOT NULL AND scope_room_id = $4))
        LIMIT 1`,
-      [subject.kind, subject.subjectRef, ROOM_READ_CAPABILITY, roomInternalId],
+      [subject.kind, subject.subjectRef, capability, roomInternalId],
     );
     return rows.length > 0;
+  }
+
+  async function subjectHoldsRead(roomInternalId: number): Promise<boolean> {
+    return subjectHoldsCapability(ROOM_READ_CAPABILITY, roomInternalId);
   }
 
   async function requireReadableRoom(roomPublicId: string): Promise<RoomRow & { id: number }> {
@@ -215,6 +235,17 @@ export function createRoomAuthorityReader(
   }
 
   return {
+    subjectLabel() {
+      return anvilSubjectLabel(subject);
+    },
+
+    async holdsCapability(capability, scopeRoomPublicId) {
+      if (scopeRoomPublicId === null) return subjectHoldsCapability(capability, null);
+      const room = await resolveRoom(scopeRoomPublicId);
+      if (room === undefined) return false;
+      return subjectHoldsCapability(capability, room.id);
+    },
+
     async listReadableRooms() {
       // Grant-filtered list — global room.read covers every room; room-scoped
       // grants cover only their scope_room_id. Same predicate as

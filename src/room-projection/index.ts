@@ -6,6 +6,7 @@ import { parseAnvilSubject, AnvilSubjectError, type AnvilRoomSubject } from "./c
 import { createRoomAuthorityReader, type RoomAuthorityReader } from "./reader.js";
 
 export * from "./contract.js";
+export * from "./control-contract.js";
 export {
   createRoomAuthorityReader,
   RoomCapabilityDeniedError,

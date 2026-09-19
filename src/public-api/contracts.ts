@@ -436,4 +436,142 @@ export const RoomEventPageSchema = z
       "Deterministic replay page: events with room_seq > the request cursor, ascending. Re-issue next_cursor as `after` to continue; identical cursors replay identical sequences.",
   });
 
+// --- I4 Hub Control Contract V1 (control plane over the Room authority seam) ---
+// Field names use the Hub Public API camelCase convention; the `control.*`
+// ANVIL capability is checked server-side per op — the transport scope only
+// selects the HTTP surface, never the authority.
+
+export const ControlOpSchema = z
+  .enum(["resume", "cancel", "retry", "acknowledge", "execution_start"])
+  .openapi("ControlOp", {
+    description:
+      "The I4 control operation. resume/retry record durable authorized intent (materialized by I3); cancel applies a durable interrupt signal; acknowledge records a client-side attention state; execution_start dispatches an approved manual run.",
+  });
+
+export const ControlOperationStatusSchema = z
+  .enum(["recorded", "applied"])
+  .openapi("ControlOperationStatus", {
+    description:
+      "recorded: the authorized intent was durably recorded for later materialization. applied: a Hub-owned effect was durably applied.",
+  });
+
+export const ControlOperationSchema = z
+  .object({
+    operationId: z.string().uuid(),
+    op: ControlOpSchema,
+    status: ControlOperationStatusSchema,
+    replayed: z.literal(true).optional(),
+    idempotencyKey: z.string(),
+    executionId: z.string().uuid().nullable(),
+    capability: z.string(),
+    subject: z.string(),
+    correlationId: z.string().nullable(),
+    effect: z.unknown(),
+    createdAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .openapi("ControlOperation", {
+    description:
+      "One recorded I4 control operation. capability is the ANVIL capability that authorized it (control.<op>); subject is the bound ANVIL subject label in producer form. effect is per-op (see the frozen contract).",
+  });
+
+export const ControlIdempotencyBodySchema = z
+  .object({
+    idempotencyKey: z.string().min(1).max(64).openapi({
+      description:
+        "REQUIRED idempotency key (1–64 chars). Re-issuing the same key returns the stored operation with replayed:true; a different op under a used key is a 409.",
+    }),
+    correlationId: z.string().min(1).optional().openapi({ description: "I1 spine passthrough." }),
+  })
+  .strict();
+
+export const ControlExecutionIdParamsSchema = z
+  .object({ executionId: z.string().uuid() })
+  .openapi("ControlExecutionIdParams", {
+    description: "Target execution: the agent_executions durable id.",
+  });
+
+/** Runtime route input for the execution-targeted POST ops (path param arrives as string). */
+export const ExecutionControlInputSchema = z.object({
+  executionId: z.string().uuid(),
+  idempotencyKey: z.string().min(1).max(64),
+  correlationId: z.string().min(1).optional(),
+});
+
+export const AcknowledgeAttentionInputSchema = z.object({
+  executionId: z.string().uuid(),
+  attentionKind: z.enum(["terminal", "idle", "finish_execution_call"]).openapi({
+    description:
+      "terminal/idle record a client-side attention state. finish_execution_call is daemon-side only and is rejected.",
+  }),
+  idempotencyKey: z.string().min(1).max(64),
+  correlationId: z.string().min(1).optional(),
+});
+
+/** JSON body for POST /controls/executions/{executionId}/acknowledge. */
+export const AcknowledgeAttentionRequestSchema = ControlIdempotencyBodySchema.extend({
+  attentionKind: z.enum(["terminal", "idle", "finish_execution_call"]).openapi({
+    description:
+      "terminal/idle record a client-side attention state. finish_execution_call is daemon-side only and is rejected with 409.",
+  }),
+}).openapi("AcknowledgeAttentionRequest");
+
+export const StartApprovedExecutionRequestSchema = ControlIdempotencyBodySchema.extend({
+  trigger: z.string().min(1).openapi({ description: "Manual trigger name to dispatch." }),
+  projectSlug: z.string().min(1).openapi({ description: "Target project slug." }),
+  input: z.unknown().optional().openapi({ description: "Trigger input payload." }),
+  actor: z.string().min(1).optional().openapi({
+    description: "Optional actor label; defaults to the calling credential id.",
+  }),
+  expectedVersionId: z.string().uuid().optional().openapi({
+    description: "Fail closed unless this configuration version is active.",
+  }),
+}).openapi("StartApprovedExecutionRequest");
+
+export const ControlOperationIdParamsSchema = z
+  .object({ operationId: z.string().uuid() })
+  .openapi("ControlOperationIdParams", { description: "Durable control operation id." });
+
+/** Runtime route input for GET /controls/operations/{operationId}. */
+export const GetControlOperationInputSchema = z.object({ operationId: z.string().uuid() });
+
+export const ControlOperationsQuerySchema = z
+  .object({
+    executionId: z.string().uuid().optional().openapi({
+      description: "Filter to operations targeting this execution.",
+    }),
+    op: ControlOpSchema.optional().openapi({ description: "Filter by control op." }),
+    status: ControlOperationStatusSchema.optional().openapi({
+      description: "Filter by recorded/applied.",
+    }),
+    limit: z.number().int().min(1).max(200).default(50).openapi({
+      description: "Maximum operations returned (1–200, default 50).",
+    }),
+  })
+  .openapi("ControlOperationsQuery");
+
+/** Runtime route input for GET /controls/operations (query arrives as strings → coerce). */
+export const ListControlOperationsInputSchema = z.object({
+  executionId: z.string().uuid().optional(),
+  op: z.enum(["resume", "cancel", "retry", "acknowledge", "execution_start"]).optional(),
+  status: z.enum(["recorded", "applied"]).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+export const ControlOperationResponseSchema = z
+  .object({ operation: ControlOperationSchema })
+  .strict()
+  .openapi("ControlOperationResponse", {
+    description:
+      "The recorded (or replayed) control operation. replayed:true is present only on idempotent replay.",
+  });
+
+export const ControlOperationListSchema = z
+  .object({ operations: z.array(ControlOperationSchema) })
+  .strict()
+  .openapi("ControlOperationList", {
+    description: "Control operations, newest first.",
+  });
+
 export type Problem = z.infer<typeof ProblemSchema>;

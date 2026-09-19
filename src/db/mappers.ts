@@ -1,6 +1,7 @@
 import type {
   AgentExecutionRow,
   AttachmentRow,
+  ControlOperationRow,
   MachineRow,
   ProjectConfigurationRevisionRow,
   ProjectRow,
@@ -11,6 +12,7 @@ import type {
   AgentExecutionOutputAttempt,
   AgentExecutionRecord,
   AttachmentRecord,
+  ControlOperationRecord,
   MachineRecord,
   ProjectConfigurationRevisionRecord,
   ProjectRecord,
@@ -128,6 +130,24 @@ export function toMachineRecord(row: MachineRow): MachineRecord {
     triggerName: row.trigger_name,
     triggerContext: row.trigger_context,
     specs: row.specs,
+  };
+}
+
+export function toControlOperationRecord(row: ControlOperationRow): ControlOperationRecord {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    op: row.op,
+    status: row.status,
+    idempotencyKey: row.idempotency_key,
+    executionId: row.execution_id,
+    capability: row.capability,
+    subject: row.subject,
+    correlationId: row.correlation_id,
+    effect: row.effect,
+    response: row.response,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 

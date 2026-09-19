@@ -1,8 +1,17 @@
 import type { ApiKeyScope } from "../auth/api-key-contract.js";
 import type { HubBundleFile } from "../config/bundle.js";
-import type { TriggerRunRecord } from "../db/types.js";
+import type {
+  AgentExecutionHubAcknowledgementInput,
+  AgentExecutionRecord,
+  ControlOperationRecord,
+  ControlOperationStatus,
+  InsertControlOperationInput,
+  ListControlOperationsFilter,
+  TriggerRunRecord,
+} from "../db/types.js";
 import type { DeploymentProjectResolution } from "../project-deployments/index.js";
 import type {
+  ControlOp,
   ProjectedRoom,
   ProjectedRoomEvent,
   ProjectedRoomParticipant,
@@ -247,6 +256,35 @@ export interface PublicOperations {
     authorization: PublicAuthorization,
     input: RoomEventsInput,
   ): Promise<ReplayRoomEventsResult>;
+  /** I4 Hub Control Contract V1. */
+  resumeExecution(
+    authorization: PublicAuthorization,
+    input: ExecutionControlInput,
+  ): Promise<ControlExecutionResult>;
+  cancelExecution(
+    authorization: PublicAuthorization,
+    input: ExecutionControlInput,
+  ): Promise<ControlExecutionResult>;
+  retryExecution(
+    authorization: PublicAuthorization,
+    input: ExecutionControlInput,
+  ): Promise<ControlExecutionResult>;
+  acknowledgeAttention(
+    authorization: PublicAuthorization,
+    input: AcknowledgeAttentionInput,
+  ): Promise<ControlExecutionResult>;
+  startApprovedExecution(
+    authorization: PublicAuthorization,
+    input: StartApprovedExecutionInput,
+  ): Promise<StartApprovedExecutionResult>;
+  getControlOperation(
+    authorization: PublicAuthorization,
+    input: GetControlOperationInput,
+  ): Promise<GetControlOperationResult>;
+  listControlOperations(
+    authorization: PublicAuthorization,
+    input: ListControlOperationsInput,
+  ): Promise<ListControlOperationsResult>;
 }
 
 export interface PublicOperationRepository {
@@ -272,6 +310,43 @@ export interface PublicOperationRepository {
     authorization: PublicAuthorization,
     input: { token: string; expiresAt: Date },
   ): Promise<"issued" | "credential_revoked" | "infrastructure_unavailable">;
+  // --- I4 control plane (Hub Control Contract V1) ---
+  /** Execution target lookup, org-scoped (cross-org ids resolve to undefined). */
+  findAgentExecution(
+    organizationId: string,
+    executionId: string,
+  ): Promise<AgentExecutionRecord | undefined>;
+  /**
+   * Durably requests the hub action on a live execution. Returns undefined
+   * when the execution is missing, not live (spawning/running), or already
+   * carries ANY pending hub action (I4 cancel requires a clean slate) —
+   * the precondition gate for cancel.
+   */
+  requestExecutionHubAction(
+    organizationId: string,
+    executionId: string,
+    action: "interrupt",
+  ): Promise<AgentExecutionRecord | undefined>;
+  recordExecutionHubAcknowledgement(
+    organizationId: string,
+    executionId: string,
+    acknowledgement: AgentExecutionHubAcknowledgementInput,
+  ): Promise<AgentExecutionRecord | undefined>;
+  insertControlOperation(
+    input: InsertControlOperationInput,
+  ): Promise<{ inserted: boolean; record: ControlOperationRecord }>;
+  findControlOperationById(
+    organizationId: string,
+    id: string,
+  ): Promise<ControlOperationRecord | undefined>;
+  findControlOperationByKey(
+    organizationId: string,
+    idempotencyKey: string,
+  ): Promise<ControlOperationRecord | undefined>;
+  listControlOperations(
+    organizationId: string,
+    filter: ListControlOperationsFilter,
+  ): Promise<ControlOperationRecord[]>;
 }
 
 export interface PublicOperationCapabilities {
@@ -317,3 +392,109 @@ export interface PublicOperationCapabilities {
    */
   roomAuthority?: RoomAuthoritySource;
 }
+
+// ---------------------------------------------------------------------------
+// I4 Hub Control Contract V1 — control-plane operation types
+// ---------------------------------------------------------------------------
+
+/** Wire form of a recorded control operation (Hub-minted; camelCase by Hub API convention). */
+export interface ControlOperationWire {
+  operationId: string;
+  op: ControlOp;
+  status: ControlOperationStatus;
+  /** Present only on idempotent replay (HTTP 200). */
+  replayed?: true;
+  idempotencyKey: string;
+  executionId: string | null;
+  /** The ANVIL capability that authorized this op (control.<op>). */
+  capability: string;
+  /** Bound ANVIL subject label in producer form (the identity that was checked). */
+  subject: string;
+  /** I1 spine passthrough. */
+  correlationId: string | null;
+  /** The Hub-owned effect applied (per-op; see the frozen contract). */
+  effect: unknown;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function toControlOperationWire(record: ControlOperationRecord): ControlOperationWire {
+  return {
+    operationId: record.id,
+    op: record.op,
+    status: record.status,
+    idempotencyKey: record.idempotencyKey,
+    executionId: record.executionId,
+    capability: record.capability,
+    subject: record.subject,
+    correlationId: record.correlationId,
+    effect: record.effect,
+    createdAt: record.createdAt.toISOString(),
+    updatedAt: record.updatedAt.toISOString(),
+  };
+}
+
+export interface ControlBaseInput {
+  /** REQUIRED — idempotency key, 1–64 chars. Same key replays the stored result. */
+  idempotencyKey: string;
+  /** I1 spine passthrough (optional). */
+  correlationId?: string | undefined;
+}
+
+export interface ExecutionControlInput extends ControlBaseInput {
+  executionId: string;
+}
+
+export type AttentionKind = "terminal" | "idle" | "finish_execution_call";
+
+export interface AcknowledgeAttentionInput extends ControlBaseInput {
+  executionId: string;
+  attentionKind: AttentionKind;
+}
+
+export interface StartApprovedExecutionInput extends ControlBaseInput {
+  trigger: string;
+  projectSlug: string;
+  input?: unknown;
+  actor?: unknown;
+  expectedVersionId?: string | undefined;
+}
+
+export interface GetControlOperationInput {
+  operationId: string;
+}
+
+export interface ListControlOperationsInput {
+  executionId?: string | undefined;
+  op?: ControlOp | undefined;
+  status?: ControlOperationStatus | undefined;
+  limit?: number | undefined;
+}
+
+export type ControlExecutionResult =
+  | { status: "applied" | "recorded"; operation: ControlOperationWire }
+  | { status: "replayed"; operation: ControlOperationWire }
+  | { status: "invalid_input"; issues: readonly DomainIssue[] }
+  | { status: "execution_not_found" }
+  | { status: "control_capability_denied"; capability: string }
+  | { status: "control_precondition_failed"; reason: string }
+  | { status: "idempotency_key_conflict"; existingOperationId: string }
+  | { status: "control_plane_unavailable" }
+  | InfrastructureUnavailable;
+
+export type StartApprovedExecutionResult =
+  | ControlExecutionResult
+  | { status: "project_not_found" }
+  | { status: "trigger_not_found" }
+  | { status: "invalid_input"; issues: readonly DomainIssue[] };
+
+export type GetControlOperationResult =
+  | { status: "ok"; operation: ControlOperationWire }
+  | { status: "control_operation_not_found" }
+  | { status: "control_plane_unavailable" }
+  | InfrastructureUnavailable;
+
+export type ListControlOperationsResult =
+  | { status: "listed"; operations: readonly ControlOperationWire[] }
+  | { status: "control_plane_unavailable" }
+  | InfrastructureUnavailable;

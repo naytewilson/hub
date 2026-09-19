@@ -330,6 +330,13 @@
       "when": 1789503103218,
       "tag": "0046_room_read_scope",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1789809471635,
+      "tag": "0047_hub_control_surface",
+      "breakpoints": true
     }
   ]
 }

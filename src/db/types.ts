@@ -1,4 +1,5 @@
 import type { AgentExecutionStatus, MachineSource, MachineStatus } from "./schema.js";
+import type { ControlOp } from "../room-projection/index.js";
 import type { JsonValue } from "../config/compiler.js";
 import type { LaunchMachineIntent } from "../dispatcher/launch-machine-intent.js";
 import type { InvocationRejection } from "../triggers/invocation.js";
@@ -162,6 +163,45 @@ export type AgentExecutionHubAcknowledgementInput =
       status: AgentExecutionHubFinishExecutionStatus;
       observedAt: Date;
     };
+
+/** I4 Hub Control Contract V1 — durable control operation ledger row. */
+export type ControlOperationStatus = "recorded" | "applied";
+
+export interface ControlOperationRecord {
+  id: string;
+  organizationId: string;
+  op: ControlOp;
+  status: ControlOperationStatus;
+  idempotencyKey: string;
+  executionId: string | null;
+  capability: string;
+  subject: string;
+  correlationId: string | null;
+  effect: unknown;
+  response: unknown;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface InsertControlOperationInput {
+  organizationId: string;
+  op: ControlOp;
+  status: ControlOperationStatus;
+  idempotencyKey: string;
+  executionId?: string | null;
+  capability: string;
+  subject: string;
+  correlationId?: string | null;
+  effect?: unknown;
+  response?: unknown;
+}
+
+export interface ListControlOperationsFilter {
+  executionId?: string;
+  op?: ControlOp;
+  status?: ControlOperationStatus;
+  limit: number;
+}
 
 export interface DaemonRecord {
   id: string;
@@ -1363,6 +1403,32 @@ export interface Database {
     acknowledgement: AgentExecutionHubAcknowledgementInput,
   ): Promise<AgentExecutionRecord | undefined>;
   completeHubAction(executionId: string, action: HubAction): Promise<boolean>;
+  /**
+   * I4 control plane: durably requests a hub action on a live execution.
+   * Sets `hub_action` only when the execution is in `spawning`/`running` with
+   * no action already pending — the daemon lifecycle (`recoverPendingHubActions`
+   * / reconcile) picks the signal up across restarts. Returns undefined when
+   * the execution is missing, terminal, or already carries a pending action.
+   */
+  requestAgentExecutionHubAction(
+    executionId: string,
+    action: HubAction,
+  ): Promise<AgentExecutionRecord | undefined>;
+  insertControlOperation(
+    input: InsertControlOperationInput,
+  ): Promise<{ inserted: boolean; record: ControlOperationRecord }>;
+  findControlOperationById(
+    organizationId: string,
+    id: string,
+  ): Promise<ControlOperationRecord | undefined>;
+  findControlOperationByKey(
+    organizationId: string,
+    idempotencyKey: string,
+  ): Promise<ControlOperationRecord | undefined>;
+  listControlOperations(
+    organizationId: string,
+    filter: ListControlOperationsFilter,
+  ): Promise<ControlOperationRecord[]>;
   createProject(input: CreateProjectInput): Promise<ProjectRecord>;
   restoreProject(organizationId: string, projectId: string): Promise<ProjectRecord>;
   getOrganizationEntitlements(

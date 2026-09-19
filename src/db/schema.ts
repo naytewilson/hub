@@ -764,6 +764,47 @@ export const agentExecutions = pgTable(
   ],
 );
 
+/**
+ * I4 Hub Control Contract V1 — durable, idempotency-keyed control operation
+ * ledger. Hub-owned (NOT an anvil.* authority table): records the authorized
+ * control intent, the ANVIL capability that authorized it, and the Hub-owned
+ * effect applied. Unique on (organization_id, idempotency_key) — the mechanical
+ * idempotency guarantee. Replayable via the controls read ops.
+ */
+export const controlOperations = pgTable(
+  "control_operations",
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    organizationId: text("organization_id").notNull(),
+    op: text().notNull(),
+    status: text().notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    executionId: uuid("execution_id"),
+    capability: text().notNull(),
+    subject: text().notNull(),
+    correlationId: text("correlation_id"),
+    effect: jsonb(),
+    response: jsonb(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("control_operations_organization_idempotency_key_unique").on(
+      table.organizationId,
+      table.idempotencyKey,
+    ),
+    index("control_operations_organization_execution_idx").on(
+      table.organizationId,
+      table.executionId,
+    ),
+    check(
+      "control_operations_op_check",
+      sql`${table.op} in ('resume', 'cancel', 'retry', 'acknowledge', 'execution_start')`,
+    ),
+    check("control_operations_status_check", sql`${table.status} in ('recorded', 'applied')`),
+  ],
+);
+
 export const users = pgTable("user", {
   id: text().primaryKey(),
   name: text().notNull(),
@@ -1284,7 +1325,7 @@ export const organizationApiKeys = pgTable(
     ),
     check(
       "organization_api_keys_scopes_check",
-      sql`${table.scopes} <@ ARRAY['projects:read', 'configuration:validate', 'configuration:install', 'runs:dispatch', 'daemons:enroll', 'rooms:read']::text[] and cardinality(${table.scopes}) > 0`,
+      sql`${table.scopes} <@ ARRAY['projects:read', 'configuration:validate', 'configuration:install', 'runs:dispatch', 'daemons:enroll', 'rooms:read', 'controls:operate', 'controls:read']::text[] and cardinality(${table.scopes}) > 0`,
     ),
   ],
 );

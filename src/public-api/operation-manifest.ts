@@ -1,11 +1,14 @@
 import type { z } from "zod";
 import type { ApiKeyScope } from "../auth/api-key-contract.js";
 import type {
+  ControlExecutionResult,
   DispatchManualRunResult,
+  GetControlOperationResult,
   GetRoomSnapshotResult,
   InstallConfigurationResult,
   InstallTriggerResult,
   IssueEnrollmentTokenResult,
+  ListControlOperationsResult,
   ListConfigurationResourcesResult,
   ListRoomsResult,
   ListSetupResourcesResult,
@@ -13,16 +16,28 @@ import type {
   ListTriggersResult,
   PublicOperations,
   ReplayRoomEventsResult,
+  StartApprovedExecutionResult,
   ValidateConfigurationResult,
   ValidateTriggerResult,
 } from "../public-operations/index.js";
 import {
+  AcknowledgeAttentionInputSchema,
+  AcknowledgeAttentionRequestSchema,
+  ControlExecutionIdParamsSchema,
+  ControlIdempotencyBodySchema,
+  ControlOperationIdParamsSchema,
+  ControlOperationListSchema,
+  ControlOperationResponseSchema,
+  ControlOperationsQuerySchema,
   DispatchManualRunRequestSchema,
   DispatchedManualRunSchema,
   EnrollmentTokenSchema,
+  ExecutionControlInputSchema,
+  GetControlOperationInputSchema,
   InstallConfigurationRequestSchema,
   InstalledConfigurationSchema,
   InstalledTriggerSchema,
+  ListControlOperationsInputSchema,
   ProjectListSchema,
   RoomEventsInputSchema,
   RoomEventsQuerySchema,
@@ -31,6 +46,7 @@ import {
   RoomListSchema,
   RoomSnapshotInputSchema,
   RoomSnapshotSchema,
+  StartApprovedExecutionRequestSchema,
   TriggerListSchema,
   ConfigurationResourcesSchema,
   SetupResourcesSchema,
@@ -52,7 +68,14 @@ export type PublicOperationId =
   | "issueEnrollmentToken"
   | "listRooms"
   | "getRoomSnapshot"
-  | "replayRoomEvents";
+  | "replayRoomEvents"
+  | "resumeExecution"
+  | "cancelExecution"
+  | "retryExecution"
+  | "acknowledgeAttention"
+  | "startApprovedExecution"
+  | "getControlOperation"
+  | "listControlOperations";
 
 export interface PublicOperationDefinition {
   id: PublicOperationId;
@@ -72,7 +95,7 @@ export interface PublicOperationDefinition {
   /** OpenAPI-only query-parameter schema. */
   querySchema?: z.ZodObject;
   successSchema: z.ZodType;
-  successStatus: 200 | 201;
+  successStatus: 200 | 201 | 202;
   resultMapping:
     | "trigger-validation"
     | "triggers"
@@ -86,10 +109,12 @@ export interface PublicOperationDefinition {
     | "enrollment-token"
     | "rooms"
     | "room-snapshot"
-    | "room-events";
+    | "room-events"
+    | "control"
+    | "control-list";
   summary: string;
   description: string;
-  tag: "Triggers" | "Projects" | "Configurations" | "Runs" | "Daemons" | "Rooms";
+  tag: "Triggers" | "Projects" | "Configurations" | "Runs" | "Daemons" | "Rooms" | "Controls";
   responses: Readonly<Record<number, string>>;
   invoke(
     operations: PublicOperations,
@@ -109,6 +134,10 @@ export interface PublicOperationDefinition {
     | ListRoomsResult
     | GetRoomSnapshotResult
     | ReplayRoomEventsResult
+    | ControlExecutionResult
+    | StartApprovedExecutionResult
+    | GetControlOperationResult
+    | ListControlOperationsResult
   >;
 }
 
@@ -418,6 +447,205 @@ export const publicOperationManifest: readonly PublicOperationDefinition[] = [
     },
     invoke: (operations, authorization, input) =>
       operations.replayRoomEvents(authorization, RoomEventsInputSchema.parse(input)),
+  },
+  {
+    id: "resumeExecution",
+    method: "post",
+    path: "/api/v1/controls/executions/{executionId}/resume",
+    scope: "controls:operate",
+    requestSchema: ControlIdempotencyBodySchema,
+    routeSchema: ControlExecutionIdParamsSchema,
+    paramsSchema: ControlExecutionIdParamsSchema,
+    successSchema: ControlOperationResponseSchema,
+    successStatus: 202,
+    resultMapping: "control",
+    summary: "Record an authorized resume intent for an execution",
+    description:
+      "Records the authorized durable resume intent for a terminal execution (applied by I3 convergence; Hub never rematerializes the execution). Requires a durable global control.resume grant for the Hub instance's bound ANVIL subject.",
+    tag: "Controls",
+    responses: {
+      200: "The idempotency key replayed a previously recorded operation.",
+      202: "The resume intent was durably recorded.",
+      400: "The request body or executionId is invalid.",
+      401: "The bearer credential is missing, malformed, or revoked.",
+      403: "The bearer credential lacks controls:operate, or the bound ANVIL subject lacks a durable global control.resume grant.",
+      404: "The execution does not exist in this organization.",
+      409: "The execution is still live, or the idempotency key was already used for a different operation.",
+      500: "The operation failed unexpectedly.",
+      503: "Hub authentication, storage, or the ANVIL authority seam is unavailable.",
+    },
+    invoke: (operations, authorization, input) =>
+      operations.resumeExecution(authorization, ExecutionControlInputSchema.parse(input)),
+  },
+  {
+    id: "cancelExecution",
+    method: "post",
+    path: "/api/v1/controls/executions/{executionId}/cancel",
+    scope: "controls:operate",
+    requestSchema: ControlIdempotencyBodySchema,
+    routeSchema: ControlExecutionIdParamsSchema,
+    paramsSchema: ControlExecutionIdParamsSchema,
+    successSchema: ControlOperationResponseSchema,
+    successStatus: 200,
+    resultMapping: "control",
+    summary: "Cancel a live execution via a durable interrupt signal",
+    description:
+      "Sets the durable hub_action=interrupt signal on a live (spawning/running) execution; the daemon lifecycle picks the signal up across Hub restarts, and the terminal state is acknowledged back through the existing acknowledgement channel. Requires a durable global control.cancel grant for the Hub instance's bound ANVIL subject.",
+    tag: "Controls",
+    responses: {
+      200: "The interrupt signal was durably applied, or the idempotency key replayed the stored operation.",
+      400: "The request body or executionId is invalid.",
+      401: "The bearer credential is missing, malformed, or revoked.",
+      403: "The bearer credential lacks controls:operate, or the bound ANVIL subject lacks a durable global control.cancel grant.",
+      404: "The execution does not exist in this organization.",
+      409: "The execution is not live or already carries the interrupt signal, or the idempotency key was already used for a different operation.",
+      500: "The operation failed unexpectedly.",
+      503: "Hub authentication, storage, or the ANVIL authority seam is unavailable.",
+    },
+    invoke: (operations, authorization, input) =>
+      operations.cancelExecution(authorization, ExecutionControlInputSchema.parse(input)),
+  },
+  {
+    id: "retryExecution",
+    method: "post",
+    path: "/api/v1/controls/executions/{executionId}/retry",
+    scope: "controls:operate",
+    requestSchema: ControlIdempotencyBodySchema,
+    routeSchema: ControlExecutionIdParamsSchema,
+    paramsSchema: ControlExecutionIdParamsSchema,
+    successSchema: ControlOperationResponseSchema,
+    successStatus: 202,
+    resultMapping: "control",
+    summary: "Record an authorized retry intent for an execution",
+    description:
+      "Records the authorized durable retry intent for a non-live execution (materialized by I3 convergence; Hub never rematerializes the execution). Requires a durable global control.retry grant for the Hub instance's bound ANVIL subject.",
+    tag: "Controls",
+    responses: {
+      200: "The idempotency key replayed a previously recorded operation.",
+      202: "The retry intent was durably recorded.",
+      400: "The request body or executionId is invalid.",
+      401: "The bearer credential is missing, malformed, or revoked.",
+      403: "The bearer credential lacks controls:operate, or the bound ANVIL subject lacks a durable global control.retry grant.",
+      404: "The execution does not exist in this organization.",
+      409: "The execution is still live, or the idempotency key was already used for a different operation.",
+      500: "The operation failed unexpectedly.",
+      503: "Hub authentication, storage, or the ANVIL authority seam is unavailable.",
+    },
+    invoke: (operations, authorization, input) =>
+      operations.retryExecution(authorization, ExecutionControlInputSchema.parse(input)),
+  },
+  {
+    id: "acknowledgeAttention",
+    method: "post",
+    path: "/api/v1/controls/executions/{executionId}/acknowledge",
+    scope: "controls:operate",
+    requestSchema: AcknowledgeAttentionRequestSchema,
+    routeSchema: ControlExecutionIdParamsSchema,
+    paramsSchema: ControlExecutionIdParamsSchema,
+    successSchema: ControlOperationResponseSchema,
+    successStatus: 200,
+    resultMapping: "control",
+    summary: "Acknowledge a client-side execution attention state",
+    description:
+      "Records a client-side attention acknowledgement (terminal/idle) against a live execution through the existing hub_action_acknowledgements state. The finish_execution_call kind is daemon-side only and is rejected here. Requires a durable global control.acknowledge grant for the Hub instance's bound ANVIL subject.",
+    tag: "Controls",
+    responses: {
+      200: "The acknowledgement was durably applied, or the idempotency key replayed the stored operation.",
+      400: "The request body or executionId is invalid.",
+      401: "The bearer credential is missing, malformed, or revoked.",
+      403: "The bearer credential lacks controls:operate, or the bound ANVIL subject lacks a durable global control.acknowledge grant.",
+      404: "The execution does not exist in this organization.",
+      409: "The attention kind is daemon-side only, or the idempotency key was already used for a different operation.",
+      500: "The operation failed unexpectedly.",
+      503: "Hub authentication, storage, or the ANVIL authority seam is unavailable.",
+    },
+    invoke: (operations, authorization, input) =>
+      operations.acknowledgeAttention(authorization, AcknowledgeAttentionInputSchema.parse(input)),
+  },
+  {
+    id: "startApprovedExecution",
+    method: "post",
+    path: "/api/v1/controls/executions/start",
+    scope: "controls:operate",
+    requestSchema: StartApprovedExecutionRequestSchema,
+    successSchema: ControlOperationResponseSchema,
+    successStatus: 201,
+    resultMapping: "control",
+    summary: "Start an approved execution through manual-run dispatch",
+    description:
+      "Dispatches a manual run for the named trigger and project — the same governed manual.run path as the Runs surface, with the approved execution's idempotency key flowing through as the delivery key. Requires a durable global control.execution_start grant for the Hub instance's bound ANVIL subject.",
+    tag: "Controls",
+    responses: {
+      200: "The idempotency key replayed a previously recorded operation.",
+      201: "The approved execution was dispatched.",
+      400: "The request body is invalid.",
+      401: "The bearer credential is missing, malformed, or revoked.",
+      403: "The bearer credential lacks controls:operate, or the bound ANVIL subject lacks a durable global control.execution_start grant.",
+      404: "The project or trigger does not exist in this organization.",
+      409: "Dispatch could not complete (daemon offline, dispatch conflict), or the idempotency key was already used for a different operation.",
+      422: "The trigger input was rejected.",
+      500: "The operation failed unexpectedly.",
+      503: "Hub authentication, storage, or the ANVIL authority seam is unavailable.",
+    },
+    invoke: (operations, authorization, input) =>
+      operations.startApprovedExecution(
+        authorization,
+        StartApprovedExecutionRequestSchema.parse(input),
+      ),
+  },
+  {
+    id: "getControlOperation",
+    method: "get",
+    path: "/api/v1/controls/operations/{operationId}",
+    scope: "controls:read",
+    routeSchema: GetControlOperationInputSchema,
+    paramsSchema: ControlOperationIdParamsSchema,
+    successSchema: ControlOperationResponseSchema,
+    successStatus: 200,
+    resultMapping: "control",
+    summary: "Get a recorded control operation",
+    description:
+      "Reads one recorded I4 control operation from the Hub-local ledger by its durable id.",
+    tag: "Controls",
+    responses: {
+      200: "The recorded control operation.",
+      400: "The operationId path parameter is invalid.",
+      401: "The bearer credential is missing, malformed, or revoked.",
+      403: "The bearer credential lacks controls:read.",
+      404: "No control operation with that id exists in this organization.",
+      500: "The operation failed unexpectedly.",
+      503: "Hub authentication, storage, or the ANVIL authority seam is unavailable.",
+    },
+    invoke: (operations, authorization, input) =>
+      operations.getControlOperation(authorization, GetControlOperationInputSchema.parse(input)),
+  },
+  {
+    id: "listControlOperations",
+    method: "get",
+    path: "/api/v1/controls/operations",
+    scope: "controls:read",
+    routeSchema: ListControlOperationsInputSchema,
+    querySchema: ControlOperationsQuerySchema,
+    successSchema: ControlOperationListSchema,
+    successStatus: 200,
+    resultMapping: "control-list",
+    summary: "List recorded control operations",
+    description:
+      "Lists recorded I4 control operations from the Hub-local ledger, newest first, with optional execution/op/status filters.",
+    tag: "Controls",
+    responses: {
+      200: "The recorded control operations.",
+      400: "A query parameter is invalid.",
+      401: "The bearer credential is missing, malformed, or revoked.",
+      403: "The bearer credential lacks controls:read.",
+      500: "The operation failed unexpectedly.",
+      503: "Hub authentication, storage, or the ANVIL authority seam is unavailable.",
+    },
+    invoke: (operations, authorization, input) =>
+      operations.listControlOperations(
+        authorization,
+        ListControlOperationsInputSchema.parse(input),
+      ),
   },
 ];
 

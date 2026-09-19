@@ -10,9 +10,13 @@ import type { ApiKeyScope } from "../auth/api-key-contract.js";
 import type { OperationAuthenticator } from "../auth/operation-auth.js";
 import { DatabaseUnavailableError } from "../db/errors.js";
 import type { PublicOperations } from "../public-operations/index.js";
+import type { ControlOperationWire } from "../public-operations/index.js";
+import type { ControlOp } from "../room-projection/index.js";
 import {
   ConfigurationResourcesSchema,
   SetupResourcesSchema,
+  ControlOperationListSchema,
+  ControlOperationResponseSchema,
   createPublicApi,
   DispatchedManualRunSchema,
   EnrollmentTokenSchema,
@@ -390,6 +394,252 @@ describe("Room projection routes", () => {
   });
 });
 
+describe("Controls routes", () => {
+  const EXECUTION_ID = "845e9d26-7977-45e1-bc69-d80a7b55a9cc";
+
+  function post(path: string, body: unknown): Request {
+    return new Request(`https://hub.test${path}`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer test-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  function get(path: string): Request {
+    return new Request(`https://hub.test${path}`, {
+      method: "GET",
+      headers: { authorization: "Bearer test-token" },
+    });
+  }
+
+  it("merges the executionId path parameter with the JSON body before the op runs", async () => {
+    let captured: unknown;
+    const api = createPublicApi(
+      { status: "enabled", authenticator: authenticator() },
+      {
+        ...successfulOperations(),
+        cancelExecution: (_authorization, input) => {
+          captured = input;
+          return Promise.resolve({ status: "applied", operation: controlOperation("cancel") });
+        },
+      },
+    );
+
+    const response = await api.handle(
+      post(`/api/v1/controls/executions/${EXECUTION_ID}/cancel`, { idempotencyKey: "k-1" }),
+    );
+    assert.equal(response.status, 200);
+    ControlOperationResponseSchema.parse(await response.json());
+    assert.deepEqual(captured, { executionId: EXECUTION_ID, idempotencyKey: "k-1" });
+  });
+
+  it("carries the acknowledge attentionKind from the JSON body", async () => {
+    let captured: unknown;
+    const api = createPublicApi(
+      { status: "enabled", authenticator: authenticator() },
+      {
+        ...successfulOperations(),
+        acknowledgeAttention: (_authorization, input) => {
+          captured = input;
+          return Promise.resolve({
+            status: "applied",
+            operation: controlOperation("acknowledge"),
+          });
+        },
+      },
+    );
+
+    const response = await api.handle(
+      post(`/api/v1/controls/executions/${EXECUTION_ID}/acknowledge`, {
+        idempotencyKey: "k-2",
+        attentionKind: "idle",
+      }),
+    );
+    assert.equal(response.status, 200);
+    ControlOperationResponseSchema.parse(await response.json());
+    assert.deepEqual(captured, {
+      executionId: EXECUTION_ID,
+      attentionKind: "idle",
+      idempotencyKey: "k-2",
+    });
+  });
+
+  it("maps applied/recorded/replayed control results to 200/202 and start to 201", async () => {
+    const api = createPublicApi(
+      { status: "enabled", authenticator: authenticator() },
+      successfulOperations(),
+    );
+
+    const resume = await api.handle(
+      post(`/api/v1/controls/executions/${EXECUTION_ID}/resume`, { idempotencyKey: "r" }),
+    );
+    assert.equal(resume.status, 202);
+
+    const retry = await api.handle(
+      post(`/api/v1/controls/executions/${EXECUTION_ID}/retry`, { idempotencyKey: "t" }),
+    );
+    assert.equal(retry.status, 202);
+
+    const start = await api.handle(
+      post("/api/v1/controls/executions/start", {
+        idempotencyKey: "s",
+        trigger: "manual",
+        projectSlug: "project",
+      }),
+    );
+    assert.equal(start.status, 201);
+
+    const replaying = createPublicApi(
+      { status: "enabled", authenticator: authenticator() },
+      {
+        ...successfulOperations(),
+        resumeExecution: () =>
+          Promise.resolve({ status: "replayed", operation: controlOperation("resume") }),
+      },
+    );
+    const replay = await replaying.handle(
+      post(`/api/v1/controls/executions/${EXECUTION_ID}/resume`, { idempotencyKey: "r" }),
+    );
+    assert.equal(replay.status, 200);
+    const replayBody = ControlOperationResponseSchema.parse(await replay.json());
+    assert.equal(replayBody.operation.operationId, "b4d5f9d7-2b2e-4f6a-9d2c-0f1e2d3c4b5a");
+  });
+
+  it("serves get and list from the Hub-local ledger", async () => {
+    const api = createPublicApi(
+      { status: "enabled", authenticator: authenticator() },
+      successfulOperations(),
+    );
+
+    const got = await api.handle(
+      get("/api/v1/controls/operations/b4d5f9d7-2b2e-4f6a-9d2c-0f1e2d3c4b5a"),
+    );
+    assert.equal(got.status, 200);
+    ControlOperationResponseSchema.parse(await got.json());
+
+    const listed = await api.handle(get("/api/v1/controls/operations?op=cancel&limit=7"));
+    assert.equal(listed.status, 200);
+    ControlOperationListSchema.parse(await listed.json());
+  });
+
+  it("rejects invalid bodies and path parameters before the operation runs", async () => {
+    const api = createPublicApi(
+      { status: "enabled", authenticator: authenticator() },
+      successfulOperations(),
+    );
+    for (const [httpRequest, path] of [
+      [
+        post(`/api/v1/controls/executions/${EXECUTION_ID}/cancel`, {}),
+        `/api/v1/controls/executions/${EXECUTION_ID}/cancel`,
+      ],
+      [
+        post("/api/v1/controls/executions/not-a-uuid/cancel", { idempotencyKey: "k" }),
+        "/api/v1/controls/executions/not-a-uuid/cancel",
+      ],
+      [
+        post(`/api/v1/controls/executions/${EXECUTION_ID}/acknowledge`, {
+          idempotencyKey: "k",
+          attentionKind: "bogus",
+        }),
+        `/api/v1/controls/executions/${EXECUTION_ID}/acknowledge`,
+      ],
+      [get("/api/v1/controls/operations/not-a-uuid"), "/api/v1/controls/operations/not-a-uuid"],
+    ] as const) {
+      const response = await api.handle(httpRequest);
+      assert.equal(response.status, 400, path);
+      assert.equal(ProblemSchema.parse(await response.json()).code, "invalid_request", path);
+    }
+  });
+
+  it("enforces controls:operate and controls:read scopes before any control read or write", async () => {
+    const api = createPublicApi(
+      { status: "enabled", authenticator: authenticator("forbidden") },
+      successfulOperations(),
+    );
+    for (const httpRequest of [
+      post(`/api/v1/controls/executions/${EXECUTION_ID}/cancel`, { idempotencyKey: "k" }),
+      get("/api/v1/controls/operations"),
+    ]) {
+      const response = await api.handle(httpRequest);
+      assert.equal(response.status, 403);
+      assert.equal(ProblemSchema.parse(await response.json()).code, "insufficient_scope");
+    }
+  });
+
+  it("maps control failure results to distinct HTTP codes", async () => {
+    const failures = [
+      [
+        "cancelExecution",
+        { status: "control_capability_denied", capability: "control.cancel" },
+        403,
+        "control_capability_denied",
+      ],
+      ["cancelExecution", { status: "execution_not_found" }, 404, "execution_not_found"],
+      [
+        "cancelExecution",
+        { status: "control_precondition_failed", reason: "not-live" },
+        409,
+        "control_precondition_failed",
+      ],
+      [
+        "cancelExecution",
+        {
+          status: "idempotency_key_conflict",
+          existingOperationId: "b4d5f9d7-2b2e-4f6a-9d2c-0f1e2d3c4b5a",
+        },
+        409,
+        "idempotency_key_conflict",
+      ],
+      [
+        "cancelExecution",
+        { status: "control_plane_unavailable" },
+        503,
+        "control_plane_unavailable",
+      ],
+      [
+        "getControlOperation",
+        { status: "control_operation_not_found" },
+        404,
+        "control_operation_not_found",
+      ],
+      [
+        "getControlOperation",
+        { status: "control_plane_unavailable" },
+        503,
+        "control_plane_unavailable",
+      ],
+      [
+        "listControlOperations",
+        { status: "infrastructure_unavailable" },
+        503,
+        "infrastructure_unavailable",
+      ],
+    ] as const;
+    for (const [op, result, status, code] of failures) {
+      const api = createPublicApi(
+        { status: "enabled", authenticator: authenticator() },
+        { ...successfulOperations(), [op]: () => Promise.resolve(result) },
+      );
+      const failureRequest = (operationName: string): Request => {
+        if (operationName === "getControlOperation") {
+          return get("/api/v1/controls/operations/b4d5f9d7-2b2e-4f6a-9d2c-0f1e2d3c4b5a");
+        }
+        if (operationName === "listControlOperations") {
+          return get("/api/v1/controls/operations");
+        }
+        return post(`/api/v1/controls/executions/${EXECUTION_ID}/cancel`, { idempotencyKey: "k" });
+      };
+      const httpRequest = failureRequest(op);
+      const response = await api.handle(httpRequest);
+      assert.equal(response.status, status, code);
+      assert.equal(ProblemSchema.parse(await response.json()).code, code, code);
+    }
+  });
+});
+
 describe("generated public OpenAPI", () => {
   it("contains only public v1 operations with complete auth, scopes, statuses, and schemas", async () => {
     const temporaryDirectory = await mkdtemp(join(tmpdir(), "paseo-openapi-"));
@@ -406,6 +656,13 @@ describe("generated public OpenAPI", () => {
       "/api/v1/configuration-resources",
       "/api/v1/configurations/install",
       "/api/v1/configurations/validate",
+      "/api/v1/controls/executions/start",
+      "/api/v1/controls/executions/{executionId}/acknowledge",
+      "/api/v1/controls/executions/{executionId}/cancel",
+      "/api/v1/controls/executions/{executionId}/resume",
+      "/api/v1/controls/executions/{executionId}/retry",
+      "/api/v1/controls/operations",
+      "/api/v1/controls/operations/{operationId}",
       "/api/v1/daemons/enrollment-tokens",
       "/api/v1/manual-runs",
       "/api/v1/projects",
@@ -442,6 +699,31 @@ describe("generated public OpenAPI", () => {
       "/api/v1/rooms/{roomId}": ["rooms:read", ["200", "400", "401", "403", "404", "500", "503"]],
       "/api/v1/rooms/{roomId}/events": [
         "rooms:read",
+        ["200", "400", "401", "403", "404", "500", "503"],
+      ],
+      "/api/v1/controls/executions/start": [
+        "controls:operate",
+        ["200", "201", "400", "401", "403", "404", "409", "422", "500", "503"],
+      ],
+      "/api/v1/controls/executions/{executionId}/resume": [
+        "controls:operate",
+        ["200", "202", "400", "401", "403", "404", "409", "500", "503"],
+      ],
+      "/api/v1/controls/executions/{executionId}/cancel": [
+        "controls:operate",
+        ["200", "400", "401", "403", "404", "409", "500", "503"],
+      ],
+      "/api/v1/controls/executions/{executionId}/retry": [
+        "controls:operate",
+        ["200", "202", "400", "401", "403", "404", "409", "500", "503"],
+      ],
+      "/api/v1/controls/executions/{executionId}/acknowledge": [
+        "controls:operate",
+        ["200", "400", "401", "403", "404", "409", "500", "503"],
+      ],
+      "/api/v1/controls/operations": ["controls:read", ["200", "400", "401", "403", "500", "503"]],
+      "/api/v1/controls/operations/{operationId}": [
+        "controls:read",
         ["200", "400", "401", "403", "404", "500", "503"],
       ],
     } as const;
@@ -664,6 +946,36 @@ function successfulOperations(): PublicOperations {
         next_cursor: 4,
         has_more: false,
       }),
+    resumeExecution: () =>
+      Promise.resolve({ status: "recorded", operation: controlOperation("resume") }),
+    cancelExecution: () =>
+      Promise.resolve({ status: "applied", operation: controlOperation("cancel") }),
+    retryExecution: () =>
+      Promise.resolve({ status: "recorded", operation: controlOperation("retry") }),
+    acknowledgeAttention: () =>
+      Promise.resolve({ status: "applied", operation: controlOperation("acknowledge") }),
+    startApprovedExecution: () =>
+      Promise.resolve({ status: "applied", operation: controlOperation("execution_start") }),
+    getControlOperation: () =>
+      Promise.resolve({ status: "ok", operation: controlOperation("cancel") }),
+    listControlOperations: () =>
+      Promise.resolve({ status: "listed", operations: [controlOperation("cancel")] }),
+  };
+}
+
+function controlOperation(op: ControlOp): ControlOperationWire {
+  return {
+    operationId: "b4d5f9d7-2b2e-4f6a-9d2c-0f1e2d3c4b5a",
+    op,
+    status: "applied",
+    idempotencyKey: "test-key-1",
+    executionId: "845e9d26-7977-45e1-bc69-d80a7b55a9cc",
+    capability: `control.${op}`,
+    subject: "machine:test",
+    correlationId: null,
+    effect: {},
+    createdAt: "2026-09-15T00:00:00.000Z",
+    updatedAt: "2026-09-15T00:00:00.000Z",
   };
 }
 
