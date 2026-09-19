@@ -241,6 +241,13 @@ describe("HTTP failure ownership", () => {
       listRooms: failOperation,
       getRoomSnapshot: failOperation,
       replayRoomEvents: failOperation,
+      resumeExecution: failOperation,
+      cancelExecution: failOperation,
+      retryExecution: failOperation,
+      acknowledgeAttention: failOperation,
+      startApprovedExecution: failOperation,
+      getControlOperation: failOperation,
+      listControlOperations: failOperation,
     };
     const api = createPublicApi(
       {

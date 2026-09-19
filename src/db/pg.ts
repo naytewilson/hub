@@ -15,6 +15,7 @@ import { ProviderEventAcceptanceRepository } from "./trigger-acceptance.js";
 import {
   toAgentExecutionRecord,
   toAttachmentRecord,
+  toControlOperationRecord,
   toMachineRecord,
   toProjectConfigurationRevisionRecord,
   toProjectRecord,
@@ -22,6 +23,7 @@ import {
   toProviderEventReceiptRecord,
 } from "./mappers.js";
 import type { AgentExecutionStatus, MachineSource, MachineStatus } from "./schema.js";
+import type { ControlOp } from "../room-projection/index.js";
 import type { DatabaseRuntime, QueryHandle, QueryRow } from "./runtime/index.js";
 import type { Locks } from "./runtime/locks/index.js";
 import type {
@@ -30,16 +32,20 @@ import type {
   AttachmentProvider,
   AttachmentRecord,
   ConfigurationSyncAttemptRecord,
+  ControlOperationRecord,
   CreateProjectInput,
   Database,
+  InsertControlOperationInput,
   InsertProjectConfigurationRevisionInput,
   InsertAgentExecutionInput,
   InsertAttachmentInput,
   InsertMachineInput,
+  ListControlOperationsFilter,
   MachineRecord,
   TerminateMachineFields,
   TransitionAgentExecutionFields,
   TransitionAgentExecutionResult,
+  ControlOperationStatus,
   ProviderEventReceiptRecord,
   ProviderEventReceiptSummary,
   EnrollDaemonInput,
@@ -2409,6 +2415,148 @@ class PgDatabase implements Database {
     }
   }
 
+  /**
+   * I4 control plane: durably requests a hub action on a live execution.
+   * Conditional UPDATE is the precondition gate — only `spawning`/`running`
+   * executions with no pending action transition, so concurrent cancels are
+   * safe and a restarted Hub never double-signals.
+   */
+  async requestAgentExecutionHubAction(
+    executionId: string,
+    action: "interrupt" | "archive",
+  ): Promise<AgentExecutionRecord | undefined> {
+    try {
+      const rows = await query<AgentExecutionRow>(
+        this.pool,
+        `update agent_executions
+         set hub_action = $2,
+             hub_action_ready_at = null,
+             hub_action_completed_at = null
+         where id = $1
+           and status in ('spawning', 'running')
+           and hub_action is null
+         returning *`,
+        [executionId, action],
+      );
+      const row = rows.rows[0];
+      return row === undefined ? undefined : toAgentExecutionRecord(row);
+    } catch (error) {
+      throw toDatabaseError(error);
+    }
+  }
+
+  async insertControlOperation(
+    input: InsertControlOperationInput,
+  ): Promise<{ inserted: boolean; record: ControlOperationRecord }> {
+    try {
+      const rows = await query<ControlOperationRow>(
+        this.pool,
+        `insert into control_operations
+           (organization_id, op, status, idempotency_key, execution_id,
+            capability, subject, correlation_id, effect, response)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
+         on conflict (organization_id, idempotency_key) do nothing
+         returning *`,
+        [
+          input.organizationId,
+          input.op,
+          input.status,
+          input.idempotencyKey,
+          input.executionId ?? null,
+          input.capability,
+          input.subject,
+          input.correlationId ?? null,
+          input.effect === undefined ? null : JSON.stringify(input.effect),
+          input.response === undefined ? null : JSON.stringify(input.response),
+        ],
+      );
+      const inserted = rows.rows[0];
+      if (inserted !== undefined) {
+        return { inserted: true, record: toControlOperationRecord(inserted) };
+      }
+      const existing = await query<ControlOperationRow>(
+        this.pool,
+        `select * from control_operations
+         where organization_id = $1 and idempotency_key = $2`,
+        [input.organizationId, input.idempotencyKey],
+      );
+      const row = existing.rows[0];
+      if (row === undefined) throw new Error("control operation conflict row missing");
+      return { inserted: false, record: toControlOperationRecord(row) };
+    } catch (error) {
+      throw toDatabaseError(error);
+    }
+  }
+
+  async findControlOperationByKey(
+    organizationId: string,
+    idempotencyKey: string,
+  ): Promise<ControlOperationRecord | undefined> {
+    try {
+      const rows = await query<ControlOperationRow>(
+        this.pool,
+        `select * from control_operations
+         where organization_id = $1 and idempotency_key = $2`,
+        [organizationId, idempotencyKey],
+      );
+      const row = rows.rows[0];
+      return row === undefined ? undefined : toControlOperationRecord(row);
+    } catch (error) {
+      throw toDatabaseError(error);
+    }
+  }
+
+  async findControlOperationById(
+    organizationId: string,
+    id: string,
+  ): Promise<ControlOperationRecord | undefined> {
+    try {
+      const rows = await query<ControlOperationRow>(
+        this.pool,
+        `select * from control_operations where organization_id = $1 and id = $2`,
+        [organizationId, id],
+      );
+      const row = rows.rows[0];
+      return row === undefined ? undefined : toControlOperationRecord(row);
+    } catch (error) {
+      throw toDatabaseError(error);
+    }
+  }
+
+  async listControlOperations(
+    organizationId: string,
+    filter: ListControlOperationsFilter,
+  ): Promise<ControlOperationRecord[]> {
+    try {
+      const conditions: string[] = ["organization_id = $1"];
+      const params: unknown[] = [organizationId];
+      if (filter.executionId !== undefined) {
+        params.push(filter.executionId);
+        conditions.push(`execution_id = $${params.length}`);
+      }
+      if (filter.op !== undefined) {
+        params.push(filter.op);
+        conditions.push(`op = $${params.length}`);
+      }
+      if (filter.status !== undefined) {
+        params.push(filter.status);
+        conditions.push(`status = $${params.length}`);
+      }
+      params.push(Math.min(Math.max(filter.limit, 1), 200));
+      const rows = await query<ControlOperationRow>(
+        this.pool,
+        `select * from control_operations
+         where ${conditions.join(" and ")}
+         order by created_at desc, id desc
+         limit $${params.length}`,
+        params,
+      );
+      return rows.rows.map(toControlOperationRecord);
+    } catch (error) {
+      throw toDatabaseError(error);
+    }
+  }
+
   async createProject(input: CreateProjectInput): Promise<ProjectRecord> {
     const rows = await query<ProjectRow>(
       this.pool,
@@ -4549,6 +4697,22 @@ export interface MachineRow extends QueryRow {
   trigger_name: string | null;
   trigger_context: unknown;
   specs: unknown;
+}
+
+export interface ControlOperationRow extends QueryRow {
+  id: string;
+  organization_id: string;
+  op: ControlOp;
+  status: ControlOperationStatus;
+  idempotency_key: string;
+  execution_id: string | null;
+  capability: string;
+  subject: string;
+  correlation_id: string | null;
+  effect: unknown;
+  response: unknown;
+  created_at: Date;
+  updated_at: Date;
 }
 
 export interface AgentExecutionRow extends QueryRow {

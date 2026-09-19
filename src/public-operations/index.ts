@@ -15,7 +15,17 @@ import type {
   PublicOperationRepository,
   PublicOperations,
 } from "./types.js";
+import { toControlOperationWire } from "./types.js";
 import { RoomCapabilityDeniedError, RoomNotFoundError } from "../room-projection/index.js";
+import { controlCapabilityFor } from "../room-projection/index.js";
+import {
+  checkControlCapability,
+  invokeControlOperation,
+  replayOrConflict,
+  resolveControlAuthority,
+  toHubAcknowledgement,
+  validateStartApprovedExecutionInput,
+} from "./control-operations.js";
 import { TriggerDocumentError } from "../triggers/configuration/index.js";
 
 export type * from "./types.js";
@@ -262,6 +272,252 @@ export function createPublicOperations(
         };
       } catch (error) {
         return roomReadErrorOrThrow(error);
+      }
+    },
+    // --- I4 Hub Control Contract V1 ---
+    async resumeExecution(authorization, input) {
+      try {
+        return await invokeControlOperation(
+          { repository, capabilities },
+          authorization,
+          "resume",
+          input,
+          async (target) => {
+            if (target === undefined) return { status: "execution_not_found" };
+            if (target.status === "spawning" || target.status === "running") {
+              return {
+                status: "control_precondition_failed",
+                reason: "execution_already_live",
+              };
+            }
+            return {
+              status: "ok",
+              durability: "recorded",
+              effect: { executionStatus: target.status },
+            };
+          },
+        );
+      } catch (error) {
+        return storageUnavailableOrThrow(error);
+      }
+    },
+    async cancelExecution(authorization, input) {
+      try {
+        return await invokeControlOperation(
+          { repository, capabilities },
+          authorization,
+          "cancel",
+          input,
+          async (target) => {
+            if (target === undefined) return { status: "execution_not_found" };
+            const updated = await repository.requestExecutionHubAction(
+              authorization.organizationId,
+              input.executionId,
+              "interrupt",
+            );
+            if (updated === undefined) {
+              // Lost-update race: a concurrent request with the same idempotency
+              // key may have won the hub_action signal. Re-check the key before
+              // reporting a precondition failure so the loser replays the
+              // winner's op instead of 409ing on its own signal.
+              const raced = await repository.findControlOperationByKey(
+                authorization.organizationId,
+                input.idempotencyKey,
+              );
+              if (raced !== undefined) {
+                return { status: "replay_stored", existing: raced };
+              }
+              return {
+                status: "control_precondition_failed",
+                reason: "execution_not_live_or_action_pending",
+              };
+            }
+            return {
+              status: "ok",
+              durability: "applied",
+              effect: { previousHubAction: null, executionStatus: updated.status },
+            };
+          },
+        );
+      } catch (error) {
+        return storageUnavailableOrThrow(error);
+      }
+    },
+    async retryExecution(authorization, input) {
+      try {
+        return await invokeControlOperation(
+          { repository, capabilities },
+          authorization,
+          "retry",
+          input,
+          async (target) => {
+            if (target === undefined) return { status: "execution_not_found" };
+            if (target.status === "spawning" || target.status === "running") {
+              return {
+                status: "control_precondition_failed",
+                reason: "execution_still_live",
+              };
+            }
+            return {
+              status: "ok",
+              durability: "recorded",
+              effect: { fromStatus: target.status },
+            };
+          },
+        );
+      } catch (error) {
+        return storageUnavailableOrThrow(error);
+      }
+    },
+    async acknowledgeAttention(authorization, input) {
+      try {
+        const observedAt = clock.nowDate();
+        return await invokeControlOperation(
+          { repository, capabilities },
+          authorization,
+          "acknowledge",
+          input,
+          async (target) => {
+            if (target === undefined) return { status: "execution_not_found" };
+            if (input.attentionKind === "finish_execution_call") {
+              return {
+                status: "control_precondition_failed",
+                reason: "finish_execution_call_is_daemon_side",
+              };
+            }
+            const updated = await repository.recordExecutionHubAcknowledgement(
+              authorization.organizationId,
+              input.executionId,
+              toHubAcknowledgement(input.attentionKind, observedAt),
+            );
+            if (updated === undefined) return { status: "execution_not_found" };
+            return {
+              status: "ok",
+              durability: "applied",
+              effect: {
+                acknowledgement: {
+                  kind: input.attentionKind,
+                  observedAt: observedAt.toISOString(),
+                },
+              },
+            };
+          },
+        );
+      } catch (error) {
+        return storageUnavailableOrThrow(error);
+      }
+    },
+    async startApprovedExecution(authorization, input) {
+      try {
+        const issues = validateStartApprovedExecutionInput(input);
+        if (issues.length > 0) return { status: "invalid_input", issues };
+        const authority = resolveControlAuthority(capabilities);
+        if (authority === undefined) return { status: "control_plane_unavailable" };
+        const check = await checkControlCapability(authority, "execution_start");
+        if (!check.allowed) {
+          return { status: "control_capability_denied", capability: check.capability };
+        }
+        const organizationId = authorization.organizationId;
+        const existing = await repository.findControlOperationByKey(
+          organizationId,
+          input.idempotencyKey,
+        );
+        if (existing !== undefined) {
+          return replayOrConflict(existing, "execution_start", undefined);
+        }
+        const project = await repository.resolveManualRunProject(
+          organizationId,
+          input.trigger,
+          input.projectSlug,
+        );
+        if (project === undefined) return { status: "project_not_found" };
+        if (project.status === "disabled") return { status: "trigger_not_found" };
+        const actor =
+          typeof input.actor === "string" && input.actor.length > 0
+            ? input.actor
+            : authorization.credentialId;
+        const deliveryKey = `control-${input.idempotencyKey}`;
+        let dispatch: DispatchManualRunResult;
+        try {
+          dispatch = await dispatchManualRun(
+            repository,
+            capabilities,
+            authorization,
+            project.id,
+            {
+              projectSlug: input.projectSlug,
+              expectedVersionId: input.expectedVersionId,
+              trigger: input.trigger,
+              actor,
+              deliveryKey,
+              input: input.input,
+            },
+            internalDeliveryId(organizationId, project.id, deliveryKey),
+          );
+        } catch (error) {
+          if (error instanceof ManualRunRejected) {
+            return { status: "control_precondition_failed", reason: error.code };
+          }
+          if (error instanceof DaemonDispatchFailure && error.reason === "daemon_unreachable") {
+            return { status: "control_precondition_failed", reason: "daemon_offline" };
+          }
+          throw error;
+        }
+        if (dispatch.status === "invalid_input") return dispatch;
+        if (dispatch.status !== "dispatched") {
+          return { status: "control_precondition_failed", reason: dispatch.status };
+        }
+        const effect = {
+          providerEventReceiptId: dispatch.providerEventReceiptId,
+          triggerRunId: dispatch.triggerRunId,
+          configuredTriggerName: dispatch.configuredTriggerName,
+        };
+        const { inserted, record } = await repository.insertControlOperation({
+          organizationId,
+          op: "execution_start",
+          status: "applied",
+          idempotencyKey: input.idempotencyKey,
+          executionId: null,
+          capability: controlCapabilityFor("execution_start"),
+          subject: authority.reader.subjectLabel(),
+          correlationId: input.correlationId ?? null,
+          effect,
+        });
+        if (inserted) {
+          return { status: "applied", operation: toControlOperationWire(record) };
+        }
+        return replayOrConflict(record, "execution_start", undefined);
+      } catch (error) {
+        return storageUnavailableOrThrow(error);
+      }
+    },
+    async getControlOperation(authorization, input) {
+      const authority = resolveControlAuthority(capabilities);
+      if (authority === undefined) return { status: "control_plane_unavailable" };
+      try {
+        const record = await repository.findControlOperationById(
+          authorization.organizationId,
+          input.operationId,
+        );
+        if (record === undefined) return { status: "control_operation_not_found" };
+        return { status: "ok", operation: toControlOperationWire(record) };
+      } catch (error) {
+        return storageUnavailableOrThrow(error);
+      }
+    },
+    async listControlOperations(authorization, input) {
+      const authority = resolveControlAuthority(capabilities);
+      if (authority === undefined) return { status: "control_plane_unavailable" };
+      try {
+        const records = await repository.listControlOperations(authorization.organizationId, {
+          ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
+          ...(input.op === undefined ? {} : { op: input.op }),
+          ...(input.status === undefined ? {} : { status: input.status }),
+          limit: input.limit ?? 50,
+        });
+        return { status: "listed", operations: records.map(toControlOperationWire) };
+      } catch (error) {
+        return storageUnavailableOrThrow(error);
       }
     },
   };

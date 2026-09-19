@@ -162,6 +162,8 @@ function sourceFor(reader: Partial<RoomAuthorityReader>): RoomAuthoritySource {
   return {
     subject: { kind: "device", subjectRef: "machine:test" },
     reader: {
+      subjectLabel: () => "machine:test",
+      holdsCapability: reader.holdsCapability ?? unimplemented,
       listReadableRooms: reader.listReadableRooms ?? unimplemented,
       readSnapshot: reader.readSnapshot ?? unimplemented,
       replayEvents: reader.replayEvents ?? unimplemented,
@@ -193,5 +195,12 @@ function unusedRepository(): PublicOperationRepository {
     resolveDeploymentProject: unused,
     findManualRun: unused,
     issueEnrollmentToken: unused,
+    findAgentExecution: unused,
+    requestExecutionHubAction: unused,
+    recordExecutionHubAcknowledgement: unused,
+    insertControlOperation: unused,
+    findControlOperationById: unused,
+    findControlOperationByKey: unused,
+    listControlOperations: unused,
   };
 }
