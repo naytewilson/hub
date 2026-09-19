@@ -82,6 +82,17 @@ const WireAppendSchema = z.object({
   causation_id: z.string().nullable(),
 });
 
+/** `anvil.room_event_find` hit — same committed-row fields, but no `duplicate`. */
+const WireEventFindSchema = z.object({
+  status: z.literal("ok"),
+  event_id: z.string(),
+  room_seq: z.number().int().positive(),
+  to: z.string(),
+  substate: z.string().nullable(),
+  correlation_id: z.string(),
+  causation_id: z.string().nullable(),
+});
+
 const WireGrantSchema = z.object({
   grant_id: z.string(),
   subject_kind: z.enum(["agent", "device", "user"]),
@@ -230,7 +241,7 @@ export function createNeoWriteApiGateway(options: NeoWriteApiOptions): Execution
         { absent: "event" },
       );
       if (structured === undefined) return undefined;
-      const wire = parseWire(WireAppendSchema, structured);
+      const wire = parseWire(WireEventFindSchema, structured);
       return {
         event_id: wire.event_id,
         room_seq: wire.room_seq,

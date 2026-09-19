@@ -19,6 +19,9 @@ import {
 } from "./contract.js";
 import { createSqlExecutionAuthorityGateway } from "./gateway.js";
 import { createExecutionConvergence, type ExecutionConvergence } from "./machine.js";
+import { z } from "zod";
+import { createNeoWriteApiGateway } from "./write-api.js";
+import { DatabaseUnavailableError } from "../db/errors.js";
 
 /**
  * I3/I4 contract tests against a real Postgres (PGlite) carrying the ANVIL
@@ -198,6 +201,103 @@ describe("executionAuthorityFromEnvironment", () => {
     assert.ok(source !== undefined);
     assert.deepEqual(source.subject, { kind: "device", subjectRef: "machine:hub-test" });
     return source.close();
+  });
+});
+
+describe("neo write api transport", () => {
+  const SUBJECT = { kind: "device" as const, subjectRef: "machine:hub-test" };
+
+  const JsonRpcCallSchema = z.object({
+    id: z.number(),
+    params: z.object({
+      name: z.string(),
+      arguments: z.record(z.string(), z.unknown()),
+    }),
+  });
+
+  function fakeFetch(structured: Record<string, unknown>) {
+    const calls: { tool: string; args: Record<string, unknown> }[] = [];
+    const fetchFn = (async (_url: unknown, init?: RequestInit) => {
+      const body = JsonRpcCallSchema.parse(
+        JSON.parse(typeof init?.body === "string" ? init.body : ""),
+      );
+      calls.push({ tool: body.params.name, args: body.params.arguments });
+      return new Response(
+        JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { structuredContent: structured } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+    return { calls, fetchFn };
+  }
+
+  function gateway(fetchFn: typeof fetch) {
+    return createNeoWriteApiGateway({
+      url: "https://neo.example.ts.net:8443/mcp",
+      token: "tok",
+      subject: SUBJECT,
+      fetchFn,
+    });
+  }
+
+  it("parses a contract-conformant room_event_find hit (no duplicate field)", async () => {
+    const { calls, fetchFn } = fakeFetch({
+      status: "ok",
+      event_id: "30000000-0000-4000-8000-0000000000e1",
+      room_seq: 42,
+      to: "paused",
+      substate: null,
+      correlation_id: CORRELATION,
+      causation_id: "hub:control:grant-1",
+    });
+    const found = await gateway(fetchFn).findTransition(7, "hub-exec:e:control:pause:g");
+    assert.deepEqual(found, {
+      event_id: "30000000-0000-4000-8000-0000000000e1",
+      room_seq: 42,
+      duplicate: true,
+      to: "paused",
+      substate: null,
+      correlation_id: CORRELATION,
+      causation_id: "hub:control:grant-1",
+    });
+    assert.equal(calls[0]?.tool, "anvil.room_event_find");
+    assert.equal(calls[0]?.args["idempotency_key"], "hub-exec:e:control:pause:g");
+    assert.equal(calls[0]?.args["room_internal_id"], 7);
+    assert.equal(calls[0]?.args["subject"], "machine:hub-test");
+  });
+
+  it("maps event_not_found to undefined", async () => {
+    const { fetchFn } = fakeFetch({ status: "event_not_found" });
+    assert.equal(await gateway(fetchFn).findTransition(7, "key"), undefined);
+  });
+
+  it("still rejects an append hit missing duplicate — append schema is not loosened", async () => {
+    const { fetchFn } = fakeFetch({
+      status: "ok",
+      event_id: "30000000-0000-4000-8000-0000000000e1",
+      room_seq: 42,
+      to: "paused",
+      substate: null,
+      correlation_id: CORRELATION,
+      causation_id: null,
+    });
+    await assert.rejects(
+      gateway(fetchFn).appendTransition({
+        room_id: ROOM,
+        roomInternalId: 7,
+        execution_id: "30000000-0000-4000-8000-0000000000e2",
+        binding_id: "30000000-0000-4000-8000-0000000000e3",
+        from: "running",
+        to: "paused",
+        substate: null,
+        reason: "operator_pause",
+        actor: CALLER,
+        correlation_id: CORRELATION,
+        causation_id: "hub:control:grant-1",
+        idempotency_key: "hub-exec:e:control:pause:g",
+        extra: {},
+      }),
+      DatabaseUnavailableError,
+    );
   });
 });
 
