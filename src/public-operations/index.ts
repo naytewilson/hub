@@ -435,19 +435,24 @@ export function createPublicOperations(
       try {
         const issues = validateStartApprovedExecutionInput(input);
         if (issues.length > 0) return { status: "invalid_input", issues };
-        const authority = resolveControlAuthority(capabilities);
-        if (authority === undefined) return { status: "control_plane_unavailable" };
-        const check = await checkControlCapability(authority, "execution_start");
-        if (!check.allowed) {
-          return { status: "control_capability_denied", capability: check.capability };
-        }
         const organizationId = authorization.organizationId;
+
+        // Frozen V1 replays the stored result before exercising any new
+        // authority. A successful start remains replayable after a grant is
+        // revoked or while the ANVIL authority seam is temporarily down.
         const existing = await repository.findControlOperationByKey(
           organizationId,
           input.idempotencyKey,
         );
         if (existing !== undefined) {
           return replayOrConflict(existing, "execution_start", undefined);
+        }
+
+        const authority = resolveControlAuthority(capabilities);
+        if (authority === undefined) return { status: "control_plane_unavailable" };
+        const check = await checkControlCapability(authority, "execution_start");
+        if (!check.allowed) {
+          return { status: "control_capability_denied", capability: check.capability };
         }
         const project = await repository.resolveManualRunProject(
           organizationId,
@@ -516,8 +521,9 @@ export function createPublicOperations(
       }
     },
     async getControlOperation(authorization, input) {
-      const authority = resolveControlAuthority(capabilities);
-      if (authority === undefined) return { status: "control_plane_unavailable" };
+      // The frozen contract makes this a Hub-local ledger read. The public
+      // route already enforces controls:read transport scope; no ANVIL
+      // capability is exercised merely to replay a stored operation.
       try {
         const record = await repository.findControlOperationById(
           authorization.organizationId,
@@ -530,8 +536,9 @@ export function createPublicOperations(
       }
     },
     async listControlOperations(authorization, input) {
-      const authority = resolveControlAuthority(capabilities);
-      if (authority === undefined) return { status: "control_plane_unavailable" };
+      // Same read-only rule as getControlOperation: Hub-local projection,
+      // transport-authorized by controls:read, independent of Room authority
+      // seam availability.
       try {
         const records = await repository.listControlOperations(authorization.organizationId, {
           ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
