@@ -189,31 +189,43 @@ export interface RoomEventsInput {
   limit: number;
 }
 
+/**
+ * Freshness fields carried by every successful Room projection response
+ * (I2/D5): `observed_at` is when the authority state backing the response was
+ * observed by the projection seam; `stale` is `now - observed_at` beyond the
+ * seam's configured freshness budget. The projection never claims authority —
+ * these fields are the honest-freshness contract consumers rely on.
+ */
+export interface ProjectionEnvelope {
+  observed_at: string;
+  stale: boolean;
+}
+
 export type ListRoomsResult =
-  | { status: "listed"; rooms: readonly ProjectedRoom[] }
+  | ({ status: "listed"; rooms: readonly ProjectedRoom[] } & ProjectionEnvelope)
   | { status: "room_projection_unavailable" }
   | InfrastructureUnavailable;
 
 export type GetRoomSnapshotResult =
-  | {
+  | ({
       status: "ok";
       room: ProjectedRoom;
       participants: readonly ProjectedRoomParticipant[];
-    }
+    } & ProjectionEnvelope)
   | { status: "room_not_found" }
   | { status: "capability_denied" }
   | { status: "room_projection_unavailable" }
   | InfrastructureUnavailable;
 
 export type ReplayRoomEventsResult =
-  | {
+  | ({
       status: "ok";
       room: ProjectedRoom;
       events: readonly ProjectedRoomEvent[];
       latest_seq: number;
       next_cursor: number;
       has_more: boolean;
-    }
+    } & ProjectionEnvelope)
   | { status: "room_not_found" }
   | { status: "capability_denied" }
   | { status: "room_projection_unavailable" }

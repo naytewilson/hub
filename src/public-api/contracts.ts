@@ -384,12 +384,26 @@ export const ProjectedRoomParticipantSchema = z
       "Active anvil.room_participants period. agent_id is the durable anvil.agents.public_id — a participant is an agent, never a session.",
   });
 
+export const EventFreshnessSchema = z
+  .object({
+    observed_at: z.string().datetime({ offset: true }).nullable(),
+    stale: z.boolean(),
+  })
+  .strict()
+  .openapi("EventFreshness", {
+    description:
+      "Hub-computed freshness for event kinds carrying an observation contract (sieve.projection). observed_at is the writer's stamp; stale is recomputed at serve time and flips true once the observation outlives its declared budget. Null observed_at means the writer's stamp was unparseable; such events always report stale.",
+  });
+
 export const ProjectedRoomEventSchema = z
   .object({
     event_id: z.string().uuid(),
     room_id: z.string().uuid(),
     room_seq: z.number().int().positive(),
-    kind: z.enum(["message", "handoff", "approval", "evidence_ref", "execution", "system"]),
+    kind: z.string().openapi({
+      description:
+        "Authority-minted event kind, passed through unchanged (e.g. message, handoff, sieve.projection, execution.transition). The taxonomy is owned by the authority plane and grows; the projection never rejects an unknown kind.",
+    }),
     producer: z.string(),
     payload: z.record(z.string(), z.unknown()),
     link: z.record(z.string(), z.unknown()),
@@ -400,6 +414,7 @@ export const ProjectedRoomEventSchema = z
     idempotency_key: z.string(),
     occurred_at: z.string().datetime({ offset: true }).nullable(),
     created_at: z.string().datetime({ offset: true }),
+    freshness: EventFreshnessSchema.optional(),
   })
   .strict()
   .openapi("ProjectedRoomEvent", {
@@ -407,8 +422,19 @@ export const ProjectedRoomEventSchema = z
       "One committed anvil.room_events row. room_seq is the canonical replay cursor (authority-assigned, per-room monotonic; gaps are legal). (room_id, room_seq) is the projection dedupe key.",
   });
 
+const ProjectionEnvelopeShape = {
+  observed_at: z.string().datetime({ offset: true }).openapi({
+    description:
+      "When the authority state backing this response was observed by the projection seam. Never a client stamp.",
+  }),
+  stale: z.boolean().openapi({
+    description:
+      "True when now - observed_at exceeds the projection freshness budget. Stale responses are last-known projections, never authority claims.",
+  }),
+} as const;
+
 export const RoomListSchema = z
-  .object({ rooms: z.array(ProjectedRoomSchema) })
+  .object({ rooms: z.array(ProjectedRoomSchema), ...ProjectionEnvelopeShape })
   .strict()
   .openapi("RoomList", {
     description: "Rooms the Hub instance's bound ANVIL subject may read.",
@@ -418,6 +444,7 @@ export const RoomSnapshotSchema = z
   .object({
     room: ProjectedRoomSchema,
     participants: z.array(ProjectedRoomParticipantSchema),
+    ...ProjectionEnvelopeShape,
   })
   .strict()
   .openapi("RoomSnapshot");
@@ -429,6 +456,7 @@ export const RoomEventPageSchema = z
     latest_seq: z.number().int().nonnegative(),
     next_cursor: z.number().int().nonnegative(),
     has_more: z.boolean(),
+    ...ProjectionEnvelopeShape,
   })
   .strict()
   .openapi("RoomEventPage", {

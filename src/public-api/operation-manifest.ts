@@ -384,7 +384,7 @@ export const publicOperationManifest: readonly PublicOperationDefinition[] = [
     resultMapping: "rooms",
     summary: "List readable Rooms",
     description:
-      "Lists ANVIL Rooms the Hub instance's bound ANVIL subject may read (a durable global or room-scoped room.read grant in anvil.capability_grants). Projection only — Room state is owned by ANVIL authority; Hub never mints room identities.",
+      "Lists ANVIL Rooms the Hub instance's bound ANVIL subject may read (a durable global or room-scoped room.read grant in anvil.capability_grants). Projection only — Room state is owned by ANVIL authority; Hub never mints room identities. Every response carries `observed_at` (when the authority state was observed) and `stale` (true once that observation outlives its freshness budget).",
     tag: "Rooms",
     responses: {
       200: "The Rooms readable by the bound ANVIL subject.",
@@ -407,7 +407,7 @@ export const publicOperationManifest: readonly PublicOperationDefinition[] = [
     resultMapping: "room-snapshot",
     summary: "Get a Room snapshot",
     description:
-      "Returns the projected Room record (durable identity, status, committed room_seq high-water) and its active participants. Requires a durable room.read grant for the bound ANVIL subject on the target Room.",
+      "Returns the projected Room record (durable identity, status, committed room_seq high-water) and its active participants. Requires a durable room.read grant for the bound ANVIL subject on the target Room. Every response carries `observed_at` and `stale` freshness fields.",
     tag: "Rooms",
     responses: {
       200: "The Room snapshot.",
@@ -434,7 +434,7 @@ export const publicOperationManifest: readonly PublicOperationDefinition[] = [
     resultMapping: "room-events",
     summary: "Replay Room events from a cursor",
     description:
-      "Deterministic cursor replay over the canonical room_seq: committed events with room_seq greater than `after`, ascending, deduplicated on (room_id, room_seq). Reconnect by re-issuing your last seen room_seq as `after`; identical cursors replay identical pages. Requires a durable room.read grant for the bound ANVIL subject on the target Room.",
+      "Deterministic cursor replay over the canonical room_seq: committed events with room_seq greater than `after`, ascending, deduplicated on (room_id, room_seq). Reconnect by re-issuing your last seen room_seq as `after`; identical cursors replay identical pages. Requires a durable room.read grant for the bound ANVIL subject on the target Room. Every response carries `observed_at` and `stale`; observation-carrying kinds (sieve.projection) also report per-event `freshness`.",
     tag: "Rooms",
     responses: {
       200: "A page of committed Room events after the cursor.",

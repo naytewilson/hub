@@ -163,6 +163,65 @@ describe("roomAuthorityFromEnvironment", () => {
       RoomAuthorityConfigError,
     );
   });
+
+  it("fails closed when both authority transports are configured", () => {
+    assert.throws(
+      () =>
+        roomAuthorityFromEnvironment({
+          PASEO_HUB_ANVIL_DATABASE_URL: "postgres://localhost/anvil_core",
+          PASEO_HUB_ANVIL_READ_API_URL: "https://neo.example.ts.net:8443/mcp",
+          PASEO_HUB_ANVIL_READ_API_TOKEN: "tok",
+          PASEO_HUB_ANVIL_SUBJECT: "machine:anvil-node-01",
+        }),
+      RoomAuthorityConfigError,
+    );
+  });
+
+  it("fails closed on a partial read-api binding", () => {
+    for (const env of [
+      { PASEO_HUB_ANVIL_READ_API_TOKEN: "tok" },
+      {
+        PASEO_HUB_ANVIL_READ_API_URL: "https://neo.example.ts.net:8443/mcp",
+        PASEO_HUB_ANVIL_SUBJECT: "machine:anvil-node-01",
+      },
+      {
+        PASEO_HUB_ANVIL_READ_API_URL: "https://neo.example.ts.net:8443/mcp",
+        PASEO_HUB_ANVIL_READ_API_TOKEN: "tok",
+      },
+      {
+        PASEO_HUB_ANVIL_READ_API_URL: "https://neo.example.ts.net:8443/mcp",
+        PASEO_HUB_ANVIL_READ_API_TOKEN: "tok",
+        PASEO_HUB_ANVIL_READ_API_TOKEN_FILE: "/tmp/token",
+        PASEO_HUB_ANVIL_SUBJECT: "machine:anvil-node-01",
+      },
+      {
+        PASEO_HUB_ANVIL_READ_API_URL: "http://169.254.1.1:8787/mcp",
+        PASEO_HUB_ANVIL_READ_API_TOKEN: "tok",
+        PASEO_HUB_ANVIL_SUBJECT: "machine:anvil-node-01",
+      },
+      {
+        PASEO_HUB_ANVIL_READ_API_URL: "https://neo.example.ts.net:8443/mcp",
+        PASEO_HUB_ANVIL_READ_API_TOKEN: "tok",
+        PASEO_HUB_ANVIL_SUBJECT: "machine:anvil-node-01",
+        PASEO_HUB_ANVIL_PROJECTION_STALE_MS: "soon",
+      },
+    ]) {
+      assert.throws(() => roomAuthorityFromEnvironment(env), RoomAuthorityConfigError);
+    }
+  });
+
+  it("binds the read-api transport when fully configured", () => {
+    const source = roomAuthorityFromEnvironment({
+      PASEO_HUB_ANVIL_READ_API_URL: "https://neo.example.ts.net:8443/mcp",
+      PASEO_HUB_ANVIL_READ_API_TOKEN: "tok",
+      PASEO_HUB_ANVIL_SUBJECT: "machine:anvil-node-01",
+      PASEO_HUB_ANVIL_PROJECTION_STALE_MS: "15000",
+    });
+    assert.ok(source !== undefined);
+    assert.deepEqual(source.subject, { kind: "device", subjectRef: "machine:anvil-node-01" });
+    assert.equal(source.staleAfterMs, 15_000);
+    return source.close();
+  });
 });
 
 describe("RoomAuthorityReader over real Postgres", () => {
@@ -252,20 +311,21 @@ describe("RoomAuthorityReader over real Postgres", () => {
   it("lists only rooms the bound subject can read", async () => {
     await grant("device", "machine:hub", "room.read", "global");
     const listed = await readerFor("machine:hub").listReadableRooms();
-    assert.deepEqual(listed.map((room) => room.room_id).sort(), [ROOM_A, ROOM_B].sort());
-    const roomA = listed.find((room) => room.room_id === ROOM_A);
+    assert.deepEqual(listed.value.map((room) => room.room_id).sort(), [ROOM_A, ROOM_B].sort());
+    const roomA = listed.value.find((room) => room.room_id === ROOM_A);
     assert.equal(roomA?.latest_seq, 5);
     assert.equal(roomA?.status, "active");
     assert.equal(roomA?.correlation_id, CORRELATION);
+    assert.ok(!Number.isNaN(Date.parse(listed.observed_at)));
 
-    assert.deepEqual(await readerFor("machine:nobody").listReadableRooms(), []);
+    assert.deepEqual((await readerFor("machine:nobody").listReadableRooms()).value, []);
   });
 
   it("grants room-scoped reads to the target room only", async () => {
     await grant("user", "operator:viewer", "room.read", "room");
     const reader = readerFor("operator:viewer");
     assert.deepEqual(
-      (await reader.listReadableRooms()).map((room) => room.room_id),
+      (await reader.listReadableRooms()).value.map((room) => room.room_id),
       [ROOM_A],
     );
     await assert.rejects(() => reader.readSnapshot(ROOM_B), RoomCapabilityDeniedError);
@@ -274,46 +334,48 @@ describe("RoomAuthorityReader over real Postgres", () => {
   it("reads a snapshot with active participants only", async () => {
     await grant("agent", null, "room.read", "global", undefined, agentReaderInternal);
     const snapshot = await readerFor(`agent:${AGENT_READER}`).readSnapshot(ROOM_A);
-    assert.equal(snapshot.room.room_id, ROOM_A);
-    assert.equal(snapshot.room.latest_seq, 5);
-    assert.equal(snapshot.participants.length, 1);
-    assert.equal(snapshot.participants[0]?.agent_id, AGENT_MEMBER);
-    assert.equal(snapshot.participants[0]?.role, "worker");
-    assert.equal(snapshot.participants[0]?.acked_seq, 2);
+    assert.equal(snapshot.value.room.room_id, ROOM_A);
+    assert.equal(snapshot.value.room.latest_seq, 5);
+    assert.equal(snapshot.value.participants.length, 1);
+    assert.equal(snapshot.value.participants[0]?.agent_id, AGENT_MEMBER);
+    assert.equal(snapshot.value.participants[0]?.role, "worker");
+    assert.equal(snapshot.value.participants[0]?.acked_seq, 2);
+    assert.ok(!Number.isNaN(Date.parse(snapshot.observed_at)));
   });
 
   it("replays events strictly after the cursor in ascending room_seq order", async () => {
     const reader = readerFor(`agent:${AGENT_READER}`);
     const page = await reader.replayEvents(ROOM_A, 0, 500);
     assert.deepEqual(
-      page.events.map((event) => event.room_seq),
+      page.value.events.map((event) => event.room_seq),
       [1, 2, 4, 5],
     );
-    assert.equal(page.latestSeq, 5);
+    assert.equal(page.value.latestSeq, 5);
+    assert.ok(!Number.isNaN(Date.parse(page.observed_at)));
 
     const reconnected = await reader.replayEvents(ROOM_A, 2, 500);
     assert.deepEqual(
-      reconnected.events.map((event) => event.room_seq),
+      reconnected.value.events.map((event) => event.room_seq),
       [4, 5],
     );
 
     const tail = await reader.replayEvents(ROOM_A, 5, 500);
-    assert.deepEqual(tail.events, []);
-    assert.equal(tail.latestSeq, 5);
+    assert.deepEqual(tail.value.events, []);
+    assert.equal(tail.value.latestSeq, 5);
   });
 
   it("replays deterministically: re-issuing a cursor yields the identical page", async () => {
     const reader = readerFor(`agent:${AGENT_READER}`);
     const first = await reader.replayEvents(ROOM_A, 1, 2);
     const second = await reader.replayEvents(ROOM_A, 1, 2);
-    assert.deepEqual(second.events, first.events);
+    assert.deepEqual(second.value.events, first.value.events);
     assert.deepEqual(
-      first.events.map((event) => event.room_seq),
+      first.value.events.map((event) => event.room_seq),
       [2, 4],
     );
     const continuation = await reader.replayEvents(ROOM_A, 4, 2);
     assert.deepEqual(
-      continuation.events.map((event) => event.room_seq),
+      continuation.value.events.map((event) => event.room_seq),
       [5],
     );
   });
@@ -325,7 +387,7 @@ describe("RoomAuthorityReader over real Postgres", () => {
     );
     const page = await reader.replayEvents(ROOM_A, 0, 500);
     assert.deepEqual(
-      page.events.map((event) => event.room_seq),
+      page.value.events.map((event) => event.room_seq),
       [1, 2, 4, 5],
     );
   });
