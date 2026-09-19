@@ -269,7 +269,7 @@ function baseCapabilities(): PublicOperationCapabilities {
 }
 
 describe("control operations", () => {
-  it("answers control_plane_unavailable on every op when the ANVIL seam is unconfigured", async () => {
+  it("fails new mutations closed without ANVIL authority while Hub-local ledger reads remain available", async () => {
     const repository = makeRepository();
     const operations = createPublicOperations(repository, baseCapabilities());
     assert.deepEqual(
@@ -317,11 +317,14 @@ describe("control operations", () => {
     );
     assert.deepEqual(
       await operations.getControlOperation(authorization, { operationId: randomUUID() }),
-      { status: "control_plane_unavailable" },
+      { status: "control_operation_not_found" },
     );
-    assert.deepEqual(await operations.listControlOperations(authorization, { limit: 10 }), {
-      status: "control_plane_unavailable",
+    const listedWithoutAuthority = await operations.listControlOperations(authorization, {
+      limit: 10,
     });
+    assert.equal(listedWithoutAuthority.status, "listed");
+    if (listedWithoutAuthority.status !== "listed") throw new Error("unreachable");
+    assert.deepEqual(listedWithoutAuthority.operations, []);
     assert.equal(repository.hubActionRequests.length, 0);
   });
 
@@ -525,6 +528,76 @@ describe("control operations", () => {
     // The durable interrupt was requested exactly once — no double effect.
     assert.equal(repository.hubActionRequests.length, 1);
     assert.equal(repository.opsById.size, 1);
+  });
+
+  it("replays stored operations before capability checks and during an authority outage", async () => {
+    const repository = makeRepository();
+    repository.executions.set(EXECUTION_ID, baseExecution());
+
+    const cancelStored = await repository.insertControlOperation({
+      organizationId: ORG,
+      op: "cancel",
+      status: "applied",
+      idempotencyKey: "replay-without-authority",
+      executionId: EXECUTION_ID,
+      capability: "control.cancel",
+      subject: "machine:test",
+    });
+    assert.equal(cancelStored.inserted, true);
+
+    const startStored = await repository.insertControlOperation({
+      organizationId: ORG,
+      op: "execution_start",
+      status: "applied",
+      idempotencyKey: "start-replay-without-authority",
+      executionId: null,
+      capability: "control.execution_start",
+      subject: "machine:test",
+    });
+    assert.equal(startStored.inserted, true);
+
+    // Revoking every durable grant does not retroactively invalidate a
+    // completed operation's replay. No new authority is exercised.
+    const revoked = createPublicOperations(repository, {
+      ...baseCapabilities(),
+      roomAuthority: makeAuthority(new Set()),
+    });
+    const revokedReplay = await revoked.cancelExecution(authorization, {
+      executionId: EXECUTION_ID,
+      idempotencyKey: "replay-without-authority",
+    });
+    assert.equal(revokedReplay.status, "replayed");
+
+    // The same invariant holds while the ANVIL authority seam is completely
+    // unavailable: replay/conflict is resolved from the Hub-local ledger.
+    const unavailable = createPublicOperations(repository, baseCapabilities());
+    const cancelReplay = await unavailable.cancelExecution(authorization, {
+      executionId: EXECUTION_ID,
+      idempotencyKey: "replay-without-authority",
+    });
+    assert.equal(cancelReplay.status, "replayed");
+    if (cancelReplay.status !== "replayed") throw new Error("unreachable");
+    assert.equal(cancelReplay.operation.operationId, cancelStored.record.id);
+
+    const startReplay = await unavailable.startApprovedExecution(authorization, {
+      idempotencyKey: "start-replay-without-authority",
+      trigger: "manual",
+      projectSlug: "project",
+    });
+    assert.equal(startReplay.status, "replayed");
+    if (startReplay.status !== "replayed") throw new Error("unreachable");
+    assert.equal(startReplay.operation.operationId, startStored.record.id);
+
+    // Stored ledger projection is likewise readable with controls:read even
+    // when Room authority is down.
+    const byId = await unavailable.getControlOperation(authorization, {
+      operationId: cancelStored.record.id,
+    });
+    assert.equal(byId.status, "ok");
+    const listed = await unavailable.listControlOperations(authorization, { limit: 10 });
+    assert.equal(listed.status, "listed");
+    if (listed.status !== "listed") throw new Error("unreachable");
+    assert.equal(listed.operations.length, 2);
   });
 
   it("conflicts when a used idempotency key is presented for a different op", async () => {
