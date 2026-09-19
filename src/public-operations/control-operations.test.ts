@@ -501,12 +501,13 @@ describe("control operations", () => {
     assert.equal(listed.operations.length, 0);
   });
 
-  it("replays a used idempotency key without re-executing the effect", async () => {
+  it("replays a used idempotency key after the authorizing grant is gone", async () => {
     const repository = makeRepository();
     repository.executions.set(EXECUTION_ID, baseExecution());
+    const grants = new Set(ALL_CONTROL_CAPABILITIES);
     const operations = createPublicOperations(repository, {
       ...baseCapabilities(),
-      roomAuthority: makeAuthority(ALL_CONTROL_CAPABILITIES),
+      roomAuthority: makeAuthority(grants),
     });
     const first = await operations.cancelExecution(authorization, {
       executionId: EXECUTION_ID,
@@ -514,6 +515,11 @@ describe("control operations", () => {
     });
     assert.equal(first.status, "applied");
     if (first.status !== "applied") throw new Error("unreachable");
+
+    // Frozen V1: the operation already executed under valid authority. A
+    // later replay returns the stored record even if that grant has since
+    // expired/revoked; no new authority or side effect is exercised.
+    grants.clear();
     const second = await operations.cancelExecution(authorization, {
       executionId: EXECUTION_ID,
       idempotencyKey: "replay-key",
@@ -527,12 +533,13 @@ describe("control operations", () => {
     assert.equal(repository.opsById.size, 1);
   });
 
-  it("conflicts when a used idempotency key is presented for a different op", async () => {
+  it("conflicts on a used key before consulting the current grant", async () => {
     const repository = makeRepository();
     repository.executions.set(EXECUTION_ID, baseExecution({ status: "failed" }));
+    const grants = new Set(ALL_CONTROL_CAPABILITIES);
     const operations = createPublicOperations(repository, {
       ...baseCapabilities(),
-      roomAuthority: makeAuthority(ALL_CONTROL_CAPABILITIES),
+      roomAuthority: makeAuthority(grants),
     });
     const recorded = await operations.retryExecution(authorization, {
       executionId: EXECUTION_ID,
@@ -540,6 +547,10 @@ describe("control operations", () => {
     });
     assert.equal(recorded.status, "recorded");
     if (recorded.status !== "recorded") throw new Error("unreachable");
+
+    // Conflict resolution is part of idempotency replay and therefore also
+    // precedes the current capability check.
+    grants.clear();
     assert.deepEqual(
       await operations.resumeExecution(authorization, {
         executionId: EXECUTION_ID,
@@ -657,16 +668,17 @@ describe("control operations", () => {
     assert.equal(repository.opsById.size, 0);
   });
 
-  it("startApprovedExecution dispatches with the idempotency-derived delivery key and records the op", async () => {
+  it("startApprovedExecution replays after its authorizing grant is gone", async () => {
     const repository = makeRepository();
     repository.projects.set(`${ORG}:manual:project`, { id: "project-1", disabled: false });
+    const grants = new Set(ALL_CONTROL_CAPABILITIES);
     const operations = createPublicOperations(repository, {
       ...baseCapabilities(),
       dispatchManualEvent: (input) => {
         repository.dispatchInputs.push(input);
         return Promise.resolve({ providerEventReceiptId: "receipt-1" });
       },
-      roomAuthority: makeAuthority(ALL_CONTROL_CAPABILITIES),
+      roomAuthority: makeAuthority(grants),
     });
     const result = await operations.startApprovedExecution(authorization, {
       idempotencyKey: "start-key",
@@ -692,7 +704,10 @@ describe("control operations", () => {
       .object({ payload: z.object({ publicDeliveryKey: z.string() }) })
       .parse(repository.dispatchInputs[0]);
     assert.equal(dispatch.payload.publicDeliveryKey, "control-start-key");
-    // A replayed key returns the recorded dispatch instead of dispatching again.
+
+    // Approved-start obeys the same frozen replay law: replay the stored
+    // result without dispatching again even after the grant is gone.
+    grants.clear();
     const replayed = await operations.startApprovedExecution(authorization, {
       idempotencyKey: "start-key",
       trigger: "manual",
