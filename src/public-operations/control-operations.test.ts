@@ -269,7 +269,7 @@ function baseCapabilities(): PublicOperationCapabilities {
 }
 
 describe("control operations", () => {
-  it("answers control_plane_unavailable on every op when the ANVIL seam is unconfigured", async () => {
+  it("fails new mutations closed without ANVIL while keeping the Hub ledger readable", async () => {
     const repository = makeRepository();
     const operations = createPublicOperations(repository, baseCapabilities());
     assert.deepEqual(
@@ -317,12 +317,73 @@ describe("control operations", () => {
     );
     assert.deepEqual(
       await operations.getControlOperation(authorization, { operationId: randomUUID() }),
-      { status: "control_plane_unavailable" },
+      { status: "control_operation_not_found" },
     );
     assert.deepEqual(await operations.listControlOperations(authorization, { limit: 10 }), {
-      status: "control_plane_unavailable",
+      status: "listed",
+      operations: [],
     });
     assert.equal(repository.hubActionRequests.length, 0);
+  });
+
+  it("replays stored mutations while the ANVIL authority seam is unavailable", async () => {
+    const repository = makeRepository();
+    const existingCancel = await repository.insertControlOperation({
+      organizationId: ORG,
+      op: "cancel",
+      status: "applied",
+      idempotencyKey: "offline-replay",
+      executionId: EXECUTION_ID,
+      capability: "control.cancel",
+      subject: "machine:test",
+      effect: { previousHubAction: null, executionStatus: "running" },
+    });
+    const existingStart = await repository.insertControlOperation({
+      organizationId: ORG,
+      op: "execution_start",
+      status: "applied",
+      idempotencyKey: "offline-start-replay",
+      executionId: null,
+      capability: "control.execution_start",
+      subject: "machine:test",
+      effect: {
+        requestTarget: {
+          trigger: "manual",
+          projectSlug: "project",
+          expectedVersionId: null,
+        },
+      },
+    });
+    const operations = createPublicOperations(repository, baseCapabilities());
+
+    const cancelReplay = await operations.cancelExecution(authorization, {
+      executionId: EXECUTION_ID,
+      idempotencyKey: "offline-replay",
+    });
+    assert.equal(cancelReplay.status, "replayed");
+    if (cancelReplay.status !== "replayed") throw new Error("unreachable");
+    assert.equal(cancelReplay.operation.operationId, existingCancel.record.id);
+    assert.equal(cancelReplay.operation.replayed, true);
+    assert.equal(repository.hubActionRequests.length, 0);
+
+    const startReplay = await operations.startApprovedExecution(authorization, {
+      idempotencyKey: "offline-start-replay",
+      trigger: "manual",
+      projectSlug: "project",
+    });
+    assert.equal(startReplay.status, "replayed");
+    if (startReplay.status !== "replayed") throw new Error("unreachable");
+    assert.equal(startReplay.operation.operationId, existingStart.record.id);
+    assert.equal(repository.dispatchInputs.length, 0);
+
+    const got = await operations.getControlOperation(authorization, {
+      operationId: existingCancel.record.id,
+    });
+    assert.equal(got.status, "ok");
+    const listed = await operations.listControlOperations(authorization, { limit: 10 });
+    assert.equal(listed.status, "listed");
+    if (listed.status !== "listed") throw new Error("unreachable");
+    assert.equal(listed.operations.length, 2);
   });
 
   it("denies every op when the bound ANVIL subject lacks the durable grant — transport scope is not authority", async () => {
@@ -558,7 +619,7 @@ describe("control operations", () => {
     assert.equal(replay.status, "replayed");
   });
 
-  it("resume and retry record intent on terminal executions and refuse live ones", async () => {
+  it("resume and retry record intent only from failed executions", async () => {
     const repository = makeRepository();
     repository.executions.set(EXECUTION_ID, baseExecution({ status: "running" }));
     const operations = createPublicOperations(repository, {
@@ -583,6 +644,22 @@ describe("control operations", () => {
     // Recorded intent does not rematerialize the execution.
     assert.equal(repository.executions.get(EXECUTION_ID)?.status, "failed");
     assert.equal(repository.executions.get(EXECUTION_ID)?.hubAction, null);
+
+    repository.executions.set(EXECUTION_ID, baseExecution({ status: "succeeded" }));
+    assert.deepEqual(
+      await operations.resumeExecution(authorization, {
+        executionId: EXECUTION_ID,
+        idempotencyKey: "resume-succeeded",
+      }),
+      { status: "control_precondition_failed", reason: "execution_not_failed" },
+    );
+    assert.deepEqual(
+      await operations.retryExecution(authorization, {
+        executionId: EXECUTION_ID,
+        idempotencyKey: "retry-succeeded",
+      }),
+      { status: "control_precondition_failed", reason: "execution_not_failed" },
+    );
   });
 
   it("acknowledge applies terminal/idle and rejects the daemon-side kind", async () => {
@@ -615,6 +692,36 @@ describe("control operations", () => {
     );
     // Rejected kinds are never recorded.
     assert.equal(repository.opsById.size, 1);
+  });
+
+  it("conflicts when an acknowledge key is reused for a different attention target", async () => {
+    const repository = makeRepository();
+    repository.executions.set(EXECUTION_ID, baseExecution());
+    const operations = createPublicOperations(repository, {
+      ...baseCapabilities(),
+      roomAuthority: makeAuthority(ALL_CONTROL_CAPABILITIES),
+    });
+
+    const first = await operations.acknowledgeAttention(authorization, {
+      executionId: EXECUTION_ID,
+      attentionKind: "idle",
+      idempotencyKey: "ack-target-key",
+    });
+    assert.equal(first.status, "applied");
+    if (first.status !== "applied") throw new Error("unreachable");
+
+    assert.deepEqual(
+      await operations.acknowledgeAttention(authorization, {
+        executionId: EXECUTION_ID,
+        attentionKind: "terminal",
+        idempotencyKey: "ack-target-key",
+      }),
+      {
+        status: "idempotency_key_conflict",
+        existingOperationId: first.operation.operationId,
+      },
+    );
+    assert.equal(repository.acknowledgementRequests.length, 1);
   });
 
   it("startApprovedExecution fails closed on project, trigger, and dispatch problems", async () => {
@@ -699,6 +806,17 @@ describe("control operations", () => {
       projectSlug: "project",
     });
     assert.equal(replayed.status, "replayed");
+    assert.equal(repository.dispatchInputs.length, 1);
+
+    const changedTarget = await operations.startApprovedExecution(authorization, {
+      idempotencyKey: "start-key",
+      trigger: "other-manual",
+      projectSlug: "other-project",
+    });
+    assert.deepEqual(changedTarget, {
+      status: "idempotency_key_conflict",
+      existingOperationId: result.operation.operationId,
+    });
     assert.equal(repository.dispatchInputs.length, 1);
   });
 
