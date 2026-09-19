@@ -35,6 +35,24 @@ Daemon environments may author `worktree.newBranch: "trigger-${{ paseo.execution
 
 `deliveryKey` is caller-supplied request identity for the existing durable manual-event path. Hub namespaces it by the authenticated organization and resolved project before persistence, so the same caller key can be used independently in different tenants or projects. Existing receipt/run de-duplication applies, but this API does not promise exactly-once execution or guaranteed response replay; retries can still fail or conflict during restart and timing races. A successful representation contains `deliveryKey`, `providerEventReceiptId`, `triggerRunId`, `configuredTriggerName`, and the durable `workflowStatus`.
 
+## Room projections
+
+Hub serves read-only projections of ANVIL Room authority — the `anvil_core` store on Neo is the single durable authority for Room and execution state. Hub never mints Room identities, never writes authority tables, and never claims authority for what it serves.
+
+| Operation                        | Scope        | Endpoint                            |
+| -------------------------------- | ------------ | ----------------------------------- |
+| List readable Rooms              | `rooms:read` | `GET /api/v1/rooms`                 |
+| Get a Room snapshot              | `rooms:read` | `GET /api/v1/rooms/{roomId}`        |
+| Replay Room events from a cursor | `rooms:read` | `GET /api/v1/rooms/{roomId}/events` |
+
+Every successful projection response carries `observed_at` — when the authority state backing the response was observed — and `stale`, computed at serve time from `observed_at` against the instance's freshness budget (`PASEO_HUB_ANVIL_PROJECTION_STALE_MS`, default `30000` ms). An observation older than the budget, or one that cannot be dated, reports `stale: true`. Freshness fields are descriptive metadata about when state was last observed, not a guarantee of currency; callers should treat `stale: true` responses as last-known state.
+
+Event replay is a deterministic cursor over the authority-assigned `room_seq`: re-issuing a cursor replays an identical page, and `next_cursor`/`has_more` derive from the committed high-water `latest_seq`. Event `kind` passes through unchanged — the authority taxonomy is owned by ANVIL and grows without Hub redeployment. Events whose payload carries an observation contract (today `sieve.projection`, carrying `observed_at` and `stale_after_ms`) are additionally annotated with a per-event `freshness: {observed_at, stale}` computed at serve time; the stored event is never mutated.
+
+Hub reads authority through the Neo-side read API — the `anvil-neo-mcp` MCP surface, bearer-authenticated over the tailnet — when `PASEO_HUB_ANVIL_READ_API_URL` plus `PASEO_HUB_ANVIL_READ_API_TOKEN` or `PASEO_HUB_ANVIL_READ_API_TOKEN_FILE` are configured. It never opens a tailnet-direct Postgres connection to Neo. A dedicated read-only Postgres pool (`PASEO_HUB_ANVIL_DATABASE_URL`) remains for authority-adjacent deployments; configuring both transports fails closed at boot. Either way, every projected row passed a durable `room.read` grant check for the Hub instance's bound ANVIL subject (`PASEO_HUB_ANVIL_SUBJECT`).
+
+Hub's own `agent_executions` table is workflow bookkeeping internal to this Hub instance — a projection of execution state, not authority (ANVIL integration campaign, demotion F2). It is not served as Room authority and must not be cited as the source of truth for execution identity; that lives in `anvil_core` (`room_events`, `execution_bindings`). The demotion is documented here and at the schema; the table is not deleted.
+
 The self-hosted Scalar reference is served with a restrictive Content Security Policy and does not require external fonts, scripts, telemetry, registries, or proxies.
 
 ## Plan catalog

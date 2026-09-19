@@ -248,6 +248,9 @@ describe("HTTP failure ownership", () => {
       startApprovedExecution: failOperation,
       getControlOperation: failOperation,
       listControlOperations: failOperation,
+      getExecution: failOperation,
+      mintExecutionGrant: failOperation,
+      controlExecution: failOperation,
     };
     const api = createPublicApi(
       {

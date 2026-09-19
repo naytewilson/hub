@@ -49,6 +49,13 @@ import { createPublicOperations } from "./public-operations/index.js";
 import { createDatabasePublicOperationRepository } from "./public-operations/database-adapter.js";
 import type { EntitlementsService } from "./entitlements/service.js";
 import type { ExecutionAuthority } from "./execution-authority/index.js";
+import {
+  createExecutionConvergence,
+  type ExecutionAuthorityWriteSource,
+  type ExecutionConvergence,
+  type ExecutionConvergenceObserver,
+} from "./execution-convergence/index.js";
+import { reportFailure } from "./failures/index.js";
 import type { RoomAuthoritySource } from "./room-projection/index.js";
 
 export interface HubRuntimeOptions {
@@ -76,6 +83,14 @@ export interface HubRuntimeOptions {
    * `room_projection_unavailable` rather than serving unchecked state.
    */
   roomAuthority?: RoomAuthoritySource;
+  /**
+   * Bound ANVIL authority WRITE seam (PASEO_HUB_ANVIL_WRITE_API_URL/token or
+   * PASEO_HUB_ANVIL_WRITE_DATABASE_URL + PASEO_HUB_ANVIL_SUBJECT). Absent → the
+   * I3 convergence observer is inert and I4 control operations answer
+   * `execution_control_unavailable`. Opt-in only: the read envs never
+   * silently activate writes.
+   */
+  anvilWriteSource?: ExecutionAuthorityWriteSource;
 }
 
 export interface HubRuntime {
@@ -151,7 +166,20 @@ export function createHubApplication(options: HubRuntimeOptions): HubApplication
     (provider): provider is TriggerProvider => provider !== undefined,
   );
   const outputRegistry = options.outputRegistry ?? new OutputExecutorRegistry();
-  const daemonModule = createAppDaemonModule(options, daemons, providers, outputRegistry);
+  // I3/I4 construction order: the lifecycle observes through a deferred
+  // facade; the real machine (which calls back into the lifecycle for control
+  // effects) is assigned right after the module is built. No events can flow
+  // before start(), so the facade never drops a signal.
+  const convergenceRef: { current: ExecutionConvergence | undefined } = { current: undefined };
+  const convergenceObserver = createConvergenceObserverFacade(options, convergenceRef);
+  const daemonModule = createAppDaemonModule(
+    options,
+    daemons,
+    providers,
+    outputRegistry,
+    convergenceObserver,
+  );
+  convergenceRef.current = createAppExecutionConvergence(options, daemonModule, daemons);
   const capabilityServer = createAppExecutionCapabilityServer(
     options,
     daemonModule,
@@ -254,6 +282,7 @@ export function createHubApplication(options: HubRuntimeOptions): HubApplication
         await Promise.all([workflowEngine.stop(), daemonModule?.lifecycle.stop(), daemons?.stop()]);
       } finally {
         await options.executionAuthority?.stop();
+        await options.anvilWriteSource?.close();
       }
     },
   };
@@ -262,6 +291,7 @@ export function createHubApplication(options: HubRuntimeOptions): HubApplication
     manualSource,
     storeForProject,
     daemons,
+    convergenceRef.current,
   );
   const publicApi = createPublicApi(options.publicApi, publicOperations);
   const operations: HubOperations = {
@@ -312,6 +342,7 @@ function createAppPublicOperations(
   manualSource: ReturnType<typeof createManualTriggerSource> | undefined,
   configurationForProject: (projectId: string) => ProjectConfigurationStore,
   daemonAgentValidator: ActiveDaemonRegistry | null,
+  convergence: ExecutionConvergence | undefined,
 ) {
   if (options.database === null || manualSource === undefined) return null;
   const database = options.database;
@@ -371,6 +402,7 @@ function createAppPublicOperations(
         ),
       dispatchManualEvent: (input) => dispatchManualTrigger(manualSource, input),
       ...(options.roomAuthority === undefined ? {} : { roomAuthority: options.roomAuthority }),
+      ...(convergence === undefined ? {} : { executionConvergence: convergence }),
     },
     options.daemonClock,
   );
@@ -427,11 +459,78 @@ function connectDaemonLifecycle(
   );
 }
 
+/** Deferred observer facade — resolves to the machine once it's built. */
+function createConvergenceObserverFacade(
+  options: HubRuntimeOptions,
+  convergenceRef: { current: ExecutionConvergence | undefined },
+): ExecutionConvergenceObserver | undefined {
+  if (options.database === null || options.anvilWriteSource === undefined) return undefined;
+  return {
+    observeDaemonEvent: (executionId, daemonId, event) =>
+      convergenceRef.current?.observeDaemonEvent(executionId, daemonId, event) ?? Promise.resolve(),
+    observeTerminalIntent: (input) =>
+      convergenceRef.current?.observeTerminalIntent(input) ?? Promise.resolve(),
+  };
+}
+
+/**
+ * I3/I4 convergence machine wiring: absent unless BOTH a Hub database and the
+ * explicit write seam are configured — no silent authority activation. Control
+ * effects route back through the lifecycle (interrupt/cancel/resume/retry).
+ */
+function createAppExecutionConvergence(
+  options: HubRuntimeOptions,
+  daemonModule: DaemonModule | null,
+  daemons: ActiveDaemonRegistry | null,
+): ExecutionConvergence | undefined {
+  if (
+    options.database === null ||
+    options.anvilWriteSource === undefined ||
+    daemonModule === null
+  ) {
+    return undefined;
+  }
+  const lifecycle = daemonModule.lifecycle;
+  return createExecutionConvergence({
+    gateway: options.anvilWriteSource.gateway,
+    database: options.database,
+    interruptExecution: async (execution) => {
+      if (execution.daemonId === null) return;
+      const connection =
+        options.daemonConnectionForId?.(execution.daemonId) ??
+        daemons?.connection(execution.daemonId);
+      await connection?.controlExecution({
+        executionId: execution.id,
+        action: "interrupt",
+      });
+    },
+    cancelExecution: (execution) => lifecycle.cancelAgentExecution(execution.id),
+    resumeExecution: async (execution) => {
+      if (execution.launchIntent === null) return false;
+      await lifecycle.handoffLaunchMachineIntent(execution.launchIntent);
+      return true;
+    },
+    dispatchRetryAttempt: async (execution, attemptExecutionId) => {
+      if (execution.launchIntent === null) {
+        throw new Error("cannot retry an execution without a launch intent");
+      }
+      await lifecycle.dispatchLaunchMachineIntentAs(execution.launchIntent, attemptExecutionId);
+    },
+    report: (error, detail) =>
+      reportFailure(error, {
+        operation: "execution-convergence.machine",
+        component: "execution-convergence",
+        ...detail,
+      }),
+  });
+}
+
 function createAppDaemonModule(
   options: HubRuntimeOptions,
   daemons: ActiveDaemonRegistry | null,
   providers: readonly TriggerProvider[],
   outputRegistry: OutputExecutorRegistry,
+  convergenceObserver?: ExecutionConvergenceObserver,
 ): DaemonModule | null {
   if (options.database === null) {
     return null;
@@ -450,6 +549,7 @@ function createAppDaemonModule(
     ...(options.executionAuthority === undefined
       ? {}
       : { executionAuthority: options.executionAuthority }),
+    ...(convergenceObserver === undefined ? {} : { executionConvergence: convergenceObserver }),
     ...(options.publicBaseUrl === undefined ? {} : { publicBaseUrl: options.publicBaseUrl }),
     ...(usesTestTiming
       ? {

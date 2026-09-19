@@ -1,9 +1,11 @@
 import type { z } from "zod";
 import type { ApiKeyScope } from "../auth/api-key-contract.js";
 import type {
+  ControlExecutionOperationResult,
   ControlExecutionResult,
   DispatchManualRunResult,
   GetControlOperationResult,
+  GetExecutionResult,
   GetRoomSnapshotResult,
   InstallConfigurationResult,
   InstallTriggerResult,
@@ -14,6 +16,7 @@ import type {
   ListSetupResourcesResult,
   ListProjectsResult,
   ListTriggersResult,
+  MintExecutionGrantResult,
   PublicOperations,
   ReplayRoomEventsResult,
   StartApprovedExecutionResult,
@@ -24,6 +27,8 @@ import {
   AcknowledgeAttentionInputSchema,
   AcknowledgeAttentionRequestSchema,
   ControlExecutionIdParamsSchema,
+  ControlExecutionInputSchema,
+  ControlExecutionRequestSchema,
   ControlIdempotencyBodySchema,
   ControlOperationIdParamsSchema,
   ControlOperationListSchema,
@@ -32,12 +37,21 @@ import {
   DispatchManualRunRequestSchema,
   DispatchedManualRunSchema,
   EnrollmentTokenSchema,
+  ExecutionActionOutcomeSchema,
+  ExecutionActionParamsSchema,
+  ExecutionActionRouteSchema,
   ExecutionControlInputSchema,
+  ExecutionDescriptionSchema,
+  ExecutionIdParamsSchema,
+  ExecutionRouteSchema,
   GetControlOperationInputSchema,
   InstallConfigurationRequestSchema,
   InstalledConfigurationSchema,
   InstalledTriggerSchema,
   ListControlOperationsInputSchema,
+  MintedExecutionGrantSchema,
+  MintExecutionGrantInputSchema,
+  MintExecutionGrantRequestSchema,
   ProjectListSchema,
   RoomEventsInputSchema,
   RoomEventsQuerySchema,
@@ -75,7 +89,10 @@ export type PublicOperationId =
   | "acknowledgeAttention"
   | "startApprovedExecution"
   | "getControlOperation"
-  | "listControlOperations";
+  | "listControlOperations"
+  | "getExecution"
+  | "mintExecutionGrant"
+  | "controlExecution";
 
 export interface PublicOperationDefinition {
   id: PublicOperationId;
@@ -111,10 +128,21 @@ export interface PublicOperationDefinition {
     | "room-snapshot"
     | "room-events"
     | "control"
-    | "control-list";
+    | "control-list"
+    | "execution"
+    | "execution-grant"
+    | "execution-action";
   summary: string;
   description: string;
-  tag: "Triggers" | "Projects" | "Configurations" | "Runs" | "Daemons" | "Rooms" | "Controls";
+  tag:
+    | "Triggers"
+    | "Projects"
+    | "Configurations"
+    | "Runs"
+    | "Daemons"
+    | "Rooms"
+    | "Controls"
+    | "Executions";
   responses: Readonly<Record<number, string>>;
   invoke(
     operations: PublicOperations,
@@ -138,6 +166,9 @@ export interface PublicOperationDefinition {
     | StartApprovedExecutionResult
     | GetControlOperationResult
     | ListControlOperationsResult
+    | GetExecutionResult
+    | MintExecutionGrantResult
+    | ControlExecutionOperationResult
   >;
 }
 
@@ -384,7 +415,7 @@ export const publicOperationManifest: readonly PublicOperationDefinition[] = [
     resultMapping: "rooms",
     summary: "List readable Rooms",
     description:
-      "Lists ANVIL Rooms the Hub instance's bound ANVIL subject may read (a durable global or room-scoped room.read grant in anvil.capability_grants). Projection only — Room state is owned by ANVIL authority; Hub never mints room identities.",
+      "Lists ANVIL Rooms the Hub instance's bound ANVIL subject may read (a durable global or room-scoped room.read grant in anvil.capability_grants). Projection only — Room state is owned by ANVIL authority; Hub never mints room identities. Every response carries `observed_at` (when the authority state was observed) and `stale` (true once that observation outlives its freshness budget).",
     tag: "Rooms",
     responses: {
       200: "The Rooms readable by the bound ANVIL subject.",
@@ -407,7 +438,7 @@ export const publicOperationManifest: readonly PublicOperationDefinition[] = [
     resultMapping: "room-snapshot",
     summary: "Get a Room snapshot",
     description:
-      "Returns the projected Room record (durable identity, status, committed room_seq high-water) and its active participants. Requires a durable room.read grant for the bound ANVIL subject on the target Room.",
+      "Returns the projected Room record (durable identity, status, committed room_seq high-water) and its active participants. Requires a durable room.read grant for the bound ANVIL subject on the target Room. Every response carries `observed_at` and `stale` freshness fields.",
     tag: "Rooms",
     responses: {
       200: "The Room snapshot.",
@@ -434,7 +465,7 @@ export const publicOperationManifest: readonly PublicOperationDefinition[] = [
     resultMapping: "room-events",
     summary: "Replay Room events from a cursor",
     description:
-      "Deterministic cursor replay over the canonical room_seq: committed events with room_seq greater than `after`, ascending, deduplicated on (room_id, room_seq). Reconnect by re-issuing your last seen room_seq as `after`; identical cursors replay identical pages. Requires a durable room.read grant for the bound ANVIL subject on the target Room.",
+      "Deterministic cursor replay over the canonical room_seq: committed events with room_seq greater than `after`, ascending, deduplicated on (room_id, room_seq). Reconnect by re-issuing your last seen room_seq as `after`; identical cursors replay identical pages. Requires a durable room.read grant for the bound ANVIL subject on the target Room. Every response carries `observed_at` and `stale`; observation-carrying kinds (sieve.projection) also report per-event `freshness`.",
     tag: "Rooms",
     responses: {
       200: "A page of committed Room events after the cursor.",
@@ -646,6 +677,101 @@ export const publicOperationManifest: readonly PublicOperationDefinition[] = [
         authorization,
         ListControlOperationsInputSchema.parse(input),
       ),
+  },
+  {
+    id: "getExecution",
+    method: "get",
+    path: "/api/v1/executions/{executionId}",
+    scope: "rooms:read",
+    routeSchema: ExecutionRouteSchema,
+    paramsSchema: ExecutionIdParamsSchema,
+    successSchema: ExecutionDescriptionSchema,
+    successStatus: 200,
+    resultMapping: "execution",
+    summary: "Observe one ANVIL-bound execution",
+    description:
+      "Returns the durable ANVIL execution lifecycle state (state, substate, last committed transition) for an execution bound to a Room. Requires rooms:read plus a durable room.read grant for the bound ANVIL subject on the execution's Room — the same capability-checked read seam as the Room endpoints.",
+    tag: "Executions",
+    responses: {
+      200: "The execution's durable authority state.",
+      400: "The executionId path parameter is invalid.",
+      401: "The bearer credential is missing, malformed, or revoked.",
+      403: "The bearer credential lacks rooms:read, or the bound ANVIL subject lacks room.read on the execution's Room.",
+      404: "No ANVIL-bound execution exists with that id.",
+      500: "The operation failed unexpectedly.",
+      503: "Hub authentication, storage, or the ANVIL authority seam is unavailable.",
+    },
+    invoke: (operations, authorization, input) =>
+      operations.getExecution(authorization, ExecutionRouteSchema.parse(input)),
+  },
+  {
+    id: "mintExecutionGrant",
+    method: "post",
+    path: "/api/v1/executions/{executionId}/grants",
+    scope: "executions:control",
+    requestSchema: MintExecutionGrantRequestSchema,
+    routeSchema: ExecutionRouteSchema,
+    paramsSchema: ExecutionIdParamsSchema,
+    successSchema: MintedExecutionGrantSchema,
+    successStatus: 201,
+    resultMapping: "execution-grant",
+    summary: "Mint a single-action execution capability grant",
+    description:
+      "Mints a Hub-issued capability grant in anvil.capability_grants scoped to (execution_id, action, your credential-derived principal). Present the returned grant_id on the action endpoint. Grants are short-lived, single-action, and bound to the requesting principal — they are never forwardable. Minting is rejected for actions that can never apply to the execution's current authority state.",
+    tag: "Executions",
+    responses: {
+      201: "The minted capability grant.",
+      400: "The request body or executionId path parameter is invalid.",
+      401: "The bearer credential is missing, malformed, or revoked.",
+      403: "The bearer credential lacks executions:control, or the bound ANVIL subject lacks room.execute on the execution's Room.",
+      404: "The execution does not exist.",
+      409: "The execution has no authority binding, the action is not legal from its current state, or its Room is not active.",
+      500: "The operation failed unexpectedly.",
+      503: "Hub authentication, storage, or the ANVIL authority write seam is unavailable.",
+    },
+    invoke: (operations, authorization, input) => {
+      const parsed = MintExecutionGrantInputSchema.parse(input);
+      return operations.mintExecutionGrant(authorization, {
+        executionId: parsed.executionId,
+        action: parsed.action,
+        ttlSeconds: parsed.ttl_seconds,
+      });
+    },
+  },
+  {
+    id: "controlExecution",
+    method: "post",
+    path: "/api/v1/executions/{executionId}/actions/{action}",
+    scope: "executions:control",
+    requestSchema: ControlExecutionRequestSchema,
+    routeSchema: ExecutionActionRouteSchema,
+    paramsSchema: ExecutionActionParamsSchema,
+    successSchema: ExecutionActionOutcomeSchema,
+    successStatus: 200,
+    resultMapping: "execution-action",
+    summary: "Act on an execution under a capability grant",
+    description:
+      "Performs one grant-scoped control action (start, pause, resume, cancel, retry, acknowledge). Validates grant → execution → principal → expiry, fails closed: a missing, expired, revoked, or mismatched grant answers capability_denied — never insufficient_scope. The committed authority transition (kind execution.transition, causation hub:control:<grant_id>) is returned as room_seq/event_id; duplicate:true means the same (execution, action, grant) was already committed and the ids name the original commit.",
+    tag: "Executions",
+    responses: {
+      200: "The action's committed authority transition.",
+      400: "The request body or path parameters are invalid.",
+      401: "The bearer credential is missing, malformed, or revoked.",
+      403: "The bearer credential lacks executions:control, or the grant failed validation (missing, expired, revoked, wrong action/correlation/principal, wrong room scope).",
+      404: "The execution does not exist.",
+      409: "The execution has no authority binding, the action is not legal from its current state, or its Room is not active.",
+      500: "The operation failed unexpectedly.",
+      503: "Hub authentication, storage, or the ANVIL authority write seam is unavailable.",
+    },
+    invoke: (operations, authorization, input) => {
+      const parsed = ControlExecutionInputSchema.parse(input);
+      return operations.controlExecution(authorization, {
+        executionId: parsed.executionId,
+        action: parsed.action,
+        grantId: parsed.grant_id,
+        ...(parsed.request_id === undefined ? {} : { requestId: parsed.request_id }),
+      });
+    },
   },
 ];
 

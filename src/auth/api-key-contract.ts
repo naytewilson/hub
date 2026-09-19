@@ -9,6 +9,7 @@ export const API_KEY_SCOPES = [
   "rooms:read",
   "controls:operate",
   "controls:read",
+  "executions:control",
 ] as const;
 
 export const apiKeyScopeSchema = z.enum(API_KEY_SCOPES);

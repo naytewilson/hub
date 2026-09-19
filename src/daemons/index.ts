@@ -2,6 +2,7 @@ import type { Database } from "../db/types.js";
 import type { LaunchMachineIntent } from "../dispatcher/launch-machine-intent.js";
 import type { TriggerProvider } from "../triggers/index.js";
 import type { ExecutionAuthority } from "../execution-authority/index.js";
+import type { ExecutionConvergenceObserver } from "../execution-convergence/index.js";
 import {
   createDaemonDispatchLifecycle,
   AgentExecutionCompletionFailure,
@@ -39,6 +40,8 @@ export interface DaemonModuleOptions {
   executionCapabilities?: OutputExecutorRegistry;
   providers?: readonly TriggerProvider[];
   executionAuthority?: ExecutionAuthority;
+  /** I3 convergence observer (authority write seam); absent → Hub-only lifecycle. */
+  executionConvergence?: ExecutionConvergenceObserver;
   connectionForDaemon(daemonId: string): DaemonConnection | undefined;
   publicBaseUrl?: string;
   completionTokenSecret?: string;
@@ -63,6 +66,9 @@ export function createDaemonModule(options: DaemonModuleOptions): DaemonModule {
       ...(options.executionAuthority === undefined
         ? {}
         : { executionAuthority: options.executionAuthority }),
+      ...(options.executionConvergence === undefined
+        ? {}
+        : { executionConvergence: options.executionConvergence }),
       ...(options.publicBaseUrl === undefined ? {} : { publicBaseUrl: options.publicBaseUrl }),
       ...(options.completionTokenSecret === undefined
         ? {}

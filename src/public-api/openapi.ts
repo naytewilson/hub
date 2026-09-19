@@ -147,6 +147,7 @@ export const publicOpenApiDocument = new OpenApiGeneratorV31(registry.definition
       { name: "Daemons" },
       { name: "Rooms" },
       { name: "Controls" },
+      { name: "Executions" },
     ],
   },
 );

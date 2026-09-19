@@ -4,9 +4,11 @@ import type { OperationAuthenticator } from "../auth/operation-auth.js";
 import { isDatabaseUnavailableError } from "../db/errors.js";
 import { reportFailure } from "../failures/index.js";
 import type {
+  ControlExecutionOperationResult,
   ControlExecutionResult,
   DispatchManualRunResult,
   GetControlOperationResult,
+  GetExecutionResult,
   GetRoomSnapshotResult,
   InstallConfigurationResult,
   InstallTriggerResult,
@@ -17,6 +19,7 @@ import type {
   ListTriggersResult,
   ListConfigurationResourcesResult,
   ListSetupResourcesResult,
+  MintExecutionGrantResult,
   PublicAuthorization,
   PublicOperations,
   ReplayRoomEventsResult,
@@ -29,8 +32,11 @@ import {
   ControlOperationResponseSchema,
   DispatchedManualRunSchema,
   EnrollmentTokenSchema,
+  ExecutionActionOutcomeSchema,
+  ExecutionDescriptionSchema,
   InstalledConfigurationSchema,
   InstalledTriggerSchema,
+  MintedExecutionGrantSchema,
   ProjectListSchema,
   RoomEventPageSchema,
   RoomListSchema,
@@ -70,7 +76,10 @@ type PublicOperationResult =
   | ControlExecutionResult
   | StartApprovedExecutionResult
   | GetControlOperationResult
-  | ListControlOperationsResult;
+  | ListControlOperationsResult
+  | GetExecutionResult
+  | MintExecutionGrantResult
+  | ControlExecutionOperationResult;
 
 export interface PublicApi {
   handle(request: Request): Promise<Response>;
@@ -362,6 +371,18 @@ const RESULT_RESPONDERS: Record<
     controlResponse(requestId, requireResult(isControlResult, result, "control")),
   "control-list": (requestId, result) =>
     controlListResponse(requestId, requireResult(isControlListResult, result, "control list")),
+  execution: (requestId, result) =>
+    executionResponse(requestId, requireResult(isExecutionResult, result, "execution")),
+  "execution-grant": (requestId, result) =>
+    executionGrantResponse(
+      requestId,
+      requireResult(isExecutionGrantResult, result, "execution grant"),
+    ),
+  "execution-action": (requestId, result) =>
+    executionActionResponse(
+      requestId,
+      requireResult(isExecutionActionResult, result, "execution action"),
+    ),
 };
 
 function requireResult<Narrowed extends PublicOperationResult>(
@@ -384,7 +405,11 @@ function operationResponse(
 function roomsResponse(requestId: string, result: ListRoomsResult): Response {
   switch (result.status) {
     case "listed":
-      return success(requestId, 200, RoomListSchema, { rooms: result.rooms });
+      return success(requestId, 200, RoomListSchema, {
+        rooms: result.rooms,
+        observed_at: result.observed_at,
+        stale: result.stale,
+      });
     case "room_projection_unavailable":
       return roomProjectionUnavailableProblem(requestId);
     case "infrastructure_unavailable":
@@ -399,6 +424,8 @@ function roomSnapshotResponse(requestId: string, result: GetRoomSnapshotResult):
       return success(requestId, 200, RoomSnapshotSchema, {
         room: result.room,
         participants: result.participants,
+        observed_at: result.observed_at,
+        stale: result.stale,
       });
     case "room_not_found":
       return problem(
@@ -427,6 +454,8 @@ function roomEventsResponse(requestId: string, result: ReplayRoomEventsResult): 
         latest_seq: result.latest_seq,
         next_cursor: result.next_cursor,
         has_more: result.has_more,
+        observed_at: result.observed_at,
+        stale: result.stale,
       });
     case "room_not_found":
       return problem(
@@ -446,13 +475,168 @@ function roomEventsResponse(requestId: string, result: ReplayRoomEventsResult): 
   return assertNever(result);
 }
 
+function executionResponse(requestId: string, result: GetExecutionResult): Response {
+  switch (result.status) {
+    case "ok":
+      return success(requestId, 200, ExecutionDescriptionSchema, {
+        execution_id: result.execution_id,
+        room_id: result.room_id,
+        correlation_id: result.correlation_id,
+        state: result.state,
+        substate: result.substate,
+        last_transition: result.last_transition,
+      });
+    case "execution_not_found":
+      return problem(
+        requestId,
+        404,
+        "execution_not_found",
+        "Execution not found",
+        "No ANVIL-bound execution exists with that id.",
+      );
+    case "room_not_found":
+      return problem(
+        requestId,
+        404,
+        "room_not_found",
+        "Room not found",
+        "No ANVIL Room exists with the execution's room public_id.",
+      );
+    case "capability_denied":
+      return capabilityDeniedProblem(requestId);
+    case "execution_control_unavailable":
+      return executionControlUnavailableProblem(requestId);
+    case "infrastructure_unavailable":
+      return infrastructureProblem(requestId);
+  }
+  return assertNever(result);
+}
+
+function executionGrantResponse(requestId: string, result: MintExecutionGrantResult): Response {
+  switch (result.status) {
+    case "minted":
+      return success(requestId, 201, MintedExecutionGrantSchema, {
+        grant_id: result.grant_id,
+        execution_id: result.execution_id,
+        action: result.action,
+        principal: result.principal,
+        issued_at: result.issued_at,
+        expires_at: result.expires_at,
+        scope_hash: result.scope_hash,
+      });
+    case "execution_not_found":
+      return problem(
+        requestId,
+        404,
+        "execution_not_found",
+        "Execution not found",
+        "No execution with that id exists in the credential's organization.",
+      );
+    case "execution_not_bound":
+      return executionNotBoundProblem(requestId);
+    case "capability_denied":
+      return capabilityDeniedProblem(requestId);
+    case "invalid_state":
+      return invalidStateProblem(requestId);
+    case "room_not_active":
+      return roomNotActiveProblem(requestId);
+    case "execution_control_unavailable":
+      return executionControlUnavailableProblem(requestId);
+    case "infrastructure_unavailable":
+      return infrastructureProblem(requestId);
+  }
+  return assertNever(result);
+}
+
+function executionActionResponse(
+  requestId: string,
+  result: ControlExecutionOperationResult,
+): Response {
+  switch (result.status) {
+    case "applied":
+      return success(requestId, 200, ExecutionActionOutcomeSchema, {
+        execution_id: result.execution_id,
+        state: result.state,
+        substate: result.substate,
+        room_seq: result.room_seq,
+        event_id: result.event_id,
+        duplicate: result.duplicate,
+        effect_applied: result.effect_applied,
+        ...(result.retry_execution_id === undefined
+          ? {}
+          : { retry_execution_id: result.retry_execution_id }),
+      });
+    case "execution_not_found":
+      return problem(
+        requestId,
+        404,
+        "execution_not_found",
+        "Execution not found",
+        "No execution with that id exists in the credential's organization.",
+      );
+    case "execution_not_bound":
+      return executionNotBoundProblem(requestId);
+    case "capability_denied":
+      return capabilityDeniedProblem(requestId);
+    case "invalid_state":
+      return invalidStateProblem(requestId);
+    case "room_not_active":
+      return roomNotActiveProblem(requestId);
+    case "execution_control_unavailable":
+      return executionControlUnavailableProblem(requestId);
+    case "infrastructure_unavailable":
+      return infrastructureProblem(requestId);
+  }
+  return assertNever(result);
+}
+
+function executionNotBoundProblem(requestId: string): Response {
+  return problem(
+    requestId,
+    409,
+    "execution_not_bound",
+    "Execution not bound",
+    "The execution has no active ANVIL execution binding; control requires the identity spine.",
+  );
+}
+
+function invalidStateProblem(requestId: string): Response {
+  return problem(
+    requestId,
+    409,
+    "invalid_state",
+    "Invalid execution state",
+    "The requested action is not legal from the execution's current authority state.",
+  );
+}
+
+function roomNotActiveProblem(requestId: string): Response {
+  return problem(
+    requestId,
+    409,
+    "room_not_active",
+    "Room not active",
+    "The execution's owning Room is not active; authority rejects further appends.",
+  );
+}
+
+function executionControlUnavailableProblem(requestId: string): Response {
+  return problem(
+    requestId,
+    503,
+    "execution_control_unavailable",
+    "Execution control unavailable",
+    "This Hub instance is not configured with the ANVIL authority write seam.",
+  );
+}
+
 function capabilityDeniedProblem(requestId: string): Response {
   return problem(
     requestId,
     403,
     "capability_denied",
-    "Room capability denied",
-    "The Hub instance's bound ANVIL subject lacks a durable room.read grant on this Room.",
+    "Capability denied",
+    "The presented grant is missing, expired, revoked, or does not cover this execution, action, and principal — or the bound ANVIL subject lacks the required authority capability.",
   );
 }
 
@@ -1067,6 +1251,45 @@ function isControlListResult(result: PublicOperationResult): result is ListContr
     result.status === "infrastructure_unavailable" ||
     result.status === "control_plane_unavailable" ||
     (result.status === "listed" && "operations" in result)
+  );
+}
+
+function isExecutionResult(result: PublicOperationResult): result is GetExecutionResult {
+  return (
+    result.status === "infrastructure_unavailable" ||
+    result.status === "execution_control_unavailable" ||
+    result.status === "execution_not_found" ||
+    result.status === "room_not_found" ||
+    result.status === "capability_denied" ||
+    (result.status === "ok" && "execution_id" in result)
+  );
+}
+
+function isExecutionGrantResult(result: PublicOperationResult): result is MintExecutionGrantResult {
+  return (
+    result.status === "infrastructure_unavailable" ||
+    result.status === "execution_control_unavailable" ||
+    result.status === "execution_not_found" ||
+    result.status === "execution_not_bound" ||
+    result.status === "capability_denied" ||
+    result.status === "invalid_state" ||
+    result.status === "room_not_active" ||
+    (result.status === "minted" && "grant_id" in result)
+  );
+}
+
+function isExecutionActionResult(
+  result: PublicOperationResult,
+): result is ControlExecutionOperationResult {
+  return (
+    result.status === "infrastructure_unavailable" ||
+    result.status === "execution_control_unavailable" ||
+    result.status === "execution_not_found" ||
+    result.status === "execution_not_bound" ||
+    result.status === "capability_denied" ||
+    result.status === "invalid_state" ||
+    result.status === "room_not_active" ||
+    (result.status === "applied" && "room_seq" in result)
   );
 }
 

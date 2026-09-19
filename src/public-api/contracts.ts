@@ -1,6 +1,11 @@
 import { extendZodWithOpenApi } from "@asteasolutions/zod-to-openapi";
 import { z } from "zod";
 import {
+  EXECUTION_ACTIONS,
+  EXECUTION_STATES,
+  EXECUTION_SUBSTATES,
+} from "../execution-convergence/contract.js";
+import {
   MAX_PROMPT_PARTIAL_CONTENT_BYTES,
   MAX_PROMPT_PARTIAL_COUNT,
   MAX_PROMPT_PARTIAL_PATH_LENGTH,
@@ -384,12 +389,26 @@ export const ProjectedRoomParticipantSchema = z
       "Active anvil.room_participants period. agent_id is the durable anvil.agents.public_id — a participant is an agent, never a session.",
   });
 
+export const EventFreshnessSchema = z
+  .object({
+    observed_at: z.string().datetime({ offset: true }).nullable(),
+    stale: z.boolean(),
+  })
+  .strict()
+  .openapi("EventFreshness", {
+    description:
+      "Hub-computed freshness for event kinds carrying an observation contract (sieve.projection). observed_at is the writer's stamp; stale is recomputed at serve time and flips true once the observation outlives its declared budget. Null observed_at means the writer's stamp was unparseable; such events always report stale.",
+  });
+
 export const ProjectedRoomEventSchema = z
   .object({
     event_id: z.string().uuid(),
     room_id: z.string().uuid(),
     room_seq: z.number().int().positive(),
-    kind: z.enum(["message", "handoff", "approval", "evidence_ref", "execution", "system"]),
+    kind: z.string().openapi({
+      description:
+        "Authority-minted event kind, passed through unchanged (e.g. message, handoff, sieve.projection, execution.transition). The taxonomy is owned by the authority plane and grows; the projection never rejects an unknown kind.",
+    }),
     producer: z.string(),
     payload: z.record(z.string(), z.unknown()),
     link: z.record(z.string(), z.unknown()),
@@ -400,6 +419,7 @@ export const ProjectedRoomEventSchema = z
     idempotency_key: z.string(),
     occurred_at: z.string().datetime({ offset: true }).nullable(),
     created_at: z.string().datetime({ offset: true }),
+    freshness: EventFreshnessSchema.optional(),
   })
   .strict()
   .openapi("ProjectedRoomEvent", {
@@ -407,8 +427,19 @@ export const ProjectedRoomEventSchema = z
       "One committed anvil.room_events row. room_seq is the canonical replay cursor (authority-assigned, per-room monotonic; gaps are legal). (room_id, room_seq) is the projection dedupe key.",
   });
 
+const ProjectionEnvelopeShape = {
+  observed_at: z.string().datetime({ offset: true }).openapi({
+    description:
+      "When the authority state backing this response was observed by the projection seam. Never a client stamp.",
+  }),
+  stale: z.boolean().openapi({
+    description:
+      "True when now - observed_at exceeds the projection freshness budget. Stale responses are last-known projections, never authority claims.",
+  }),
+} as const;
+
 export const RoomListSchema = z
-  .object({ rooms: z.array(ProjectedRoomSchema) })
+  .object({ rooms: z.array(ProjectedRoomSchema), ...ProjectionEnvelopeShape })
   .strict()
   .openapi("RoomList", {
     description: "Rooms the Hub instance's bound ANVIL subject may read.",
@@ -418,6 +449,7 @@ export const RoomSnapshotSchema = z
   .object({
     room: ProjectedRoomSchema,
     participants: z.array(ProjectedRoomParticipantSchema),
+    ...ProjectionEnvelopeShape,
   })
   .strict()
   .openapi("RoomSnapshot");
@@ -429,6 +461,7 @@ export const RoomEventPageSchema = z
     latest_seq: z.number().int().nonnegative(),
     next_cursor: z.number().int().nonnegative(),
     has_more: z.boolean(),
+    ...ProjectionEnvelopeShape,
   })
   .strict()
   .openapi("RoomEventPage", {
@@ -573,5 +606,144 @@ export const ControlOperationListSchema = z
   .openapi("ControlOperationList", {
     description: "Control operations, newest first.",
   });
+// --- I4 capability-scoped execution control (ANVIL authority vocabulary) ---
+// Path params are Hub routing vocabulary (camelCase); request/response fields
+// are authority-minted and keep the Foundation wire form (snake_case).
+
+export const ExecutionIdParamsSchema = z
+  .object({ executionId: z.string().uuid() })
+  .openapi("ExecutionIdParams", {
+    description: "Durable execution identity: anvil.execution_bindings.execution_id.",
+  });
+
+export const ExecutionActionSchema = z.enum(EXECUTION_ACTIONS).openapi("ExecutionAction", {
+  description:
+    "Capability-scoped control action. Each maps to the authority capability execution.<action>.",
+});
+
+export const ExecutionActionParamsSchema = z
+  .object({ executionId: z.string().uuid(), action: ExecutionActionSchema })
+  .openapi("ExecutionActionParams");
+
+/** Runtime route input for execution routes (path params only). */
+export const ExecutionRouteSchema = z.object({ executionId: z.string().uuid() });
+export const ExecutionActionRouteSchema = z.object({
+  executionId: z.string().uuid(),
+  action: z.enum(EXECUTION_ACTIONS),
+});
+
+export const MintExecutionGrantRequestSchema = z
+  .object({
+    action: ExecutionActionSchema,
+    ttl_seconds: z.coerce.number().int().min(1).max(3600).default(300).openapi({
+      description: "Grant lifetime in seconds (default 300, max 3600).",
+    }),
+  })
+  .strict()
+  .openapi("MintExecutionGrantRequest");
+
+export const MintedExecutionGrantSchema = z
+  .object({
+    grant_id: z.string().uuid(),
+    execution_id: z.string().uuid(),
+    action: ExecutionActionSchema,
+    principal: z.string().openapi({
+      description:
+        "The principal the grant is bound to (v1: device:hub-credential:<credentialId>). Presenting it under another credential is capability_denied.",
+    }),
+    issued_at: z.string().datetime({ offset: true }),
+    expires_at: z.string().datetime({ offset: true }),
+    scope_hash: z.string().openapi({
+      description:
+        "sha256 over grant_id|execution_id|action|principal|issued_at|expires_at — advisory; the durable grant row is authoritative.",
+    }),
+  })
+  .strict()
+  .openapi("MintedExecutionGrant");
+
+export const ControlExecutionRequestSchema = z
+  .object({
+    grant_id: z.string().uuid().openapi({
+      description:
+        "A Hub-minted capability grant for (this execution, this action, your principal).",
+    }),
+    request_id: z.string().min(1).max(200).optional().openapi({
+      description:
+        "Opaque caller idempotency discriminator; required only to re-acknowledge an execution with a fresh acknowledge grant.",
+    }),
+  })
+  .strict()
+  .openapi("ControlExecutionRequest");
+
+/**
+ * Merged route+body inputs parsed inside `invoke` — the executor applies each
+ * schema separately; these re-parse the merged object once for the operation.
+ */
+export const MintExecutionGrantInputSchema = z.object({
+  executionId: z.string().uuid(),
+  action: z.enum(EXECUTION_ACTIONS),
+  ttl_seconds: z.coerce.number().int().min(1).max(3600).default(300),
+});
+
+export const ControlExecutionInputSchema = z.object({
+  executionId: z.string().uuid(),
+  action: z.enum(EXECUTION_ACTIONS),
+  grant_id: z.string().uuid(),
+  request_id: z.string().min(1).max(200).optional(),
+});
+
+export const ExecutionStateWireSchema = z.enum(EXECUTION_STATES).openapi("ExecutionState", {
+  description:
+    "Durable ANVIL execution lifecycle state (synthesized Hub-side, persisted to authority). Never Paseo's native agent status.",
+});
+
+export const ExecutionSubstateWireSchema = z
+  .enum(EXECUTION_SUBSTATES)
+  .nullable()
+  .openapi("ExecutionSubstate");
+
+export const ExecutionActionOutcomeSchema = z
+  .object({
+    execution_id: z.string().uuid(),
+    state: ExecutionStateWireSchema,
+    substate: ExecutionSubstateWireSchema,
+    room_seq: z.number().int().positive().openapi({
+      description: "Authority-assigned room_seq of the committed execution.transition event.",
+    }),
+    event_id: z.string().uuid(),
+    duplicate: z.boolean().openapi({
+      description:
+        "True when the same (execution, action, grant) was already committed; room_seq/event_id identify the original commit.",
+    }),
+    effect_applied: z.boolean().openapi({
+      description:
+        "False when the authority transition committed but the Hub/daemon-side effect could not be applied (e.g. no live daemon to interrupt).",
+    }),
+    retry_execution_id: z.string().uuid().optional().openapi({
+      description: "For retry: the deterministic id of the new attempt execution.",
+    }),
+  })
+  .strict()
+  .openapi("ExecutionActionOutcome");
+
+export const ExecutionDescriptionSchema = z
+  .object({
+    execution_id: z.string().uuid(),
+    room_id: z.string().uuid(),
+    correlation_id: z.string().uuid(),
+    state: ExecutionStateWireSchema,
+    substate: ExecutionSubstateWireSchema,
+    last_transition: z
+      .object({
+        room_seq: z.number().int().positive(),
+        event_id: z.string().uuid(),
+        occurred_at: z.string().datetime({ offset: true }).nullable(),
+        causation_id: z.string().nullable(),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict()
+  .openapi("ExecutionDescription");
 
 export type Problem = z.infer<typeof ProblemSchema>;

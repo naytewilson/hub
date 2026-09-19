@@ -23,6 +23,7 @@ import { logger as defaultLogger } from "../logger.js";
 import { reportFailure } from "../failures/index.js";
 import type { TriggerProvider } from "../triggers/index.js";
 import type { ExecutionAuthority } from "../execution-authority/index.js";
+import type { ExecutionConvergenceObserver } from "../execution-convergence/index.js";
 import { OutputExecutorRegistry } from "../execution-capabilities/outputs.js";
 import { executionToolPolicy } from "../execution-capabilities/tool-policy.js";
 import { materializeDaemonMcpServers } from "../config/external-mcp.js";
@@ -101,6 +102,12 @@ export interface DaemonDispatchLifecycleOptions {
   executionCapabilities?: OutputExecutorRegistry;
   providers?: readonly TriggerProvider[];
   executionAuthority?: ExecutionAuthority;
+  /**
+   * I3 convergence machine: folds daemon events into the durable ANVIL
+   * execution lifecycle and owns the terminal-authority funnel. Absent → Hub
+   * behaves exactly as before (convergence is opt-in at composition time).
+   */
+  executionConvergence?: ExecutionConvergenceObserver;
   publicBaseUrl?: string;
   completionTokenSecret?: string;
   test?: {
@@ -219,6 +226,32 @@ export class DaemonDispatchLifecycle {
     }
     this.startDurableDispatch(prepared, this.notifyDispatchAccepted(intent, true));
     return { execution: prepared.execution };
+  }
+
+  /**
+   * I4 retry: dispatch a fresh attempt under a caller-chosen deterministic
+   * execution id (derived by the convergence machine from the grant) so a
+   * replayed control call lands on the same attempt row.
+   */
+  async dispatchLaunchMachineIntentAs(
+    intent: LaunchMachineIntent,
+    executionId: string,
+  ): Promise<DaemonDispatchResult> {
+    const prepared = await this.prepareDispatch(intent, executionId);
+    if (prepared === undefined) {
+      throw new DaemonDispatchFailure("dispatch_conflict");
+    }
+    return this.spawnPreparedDispatch(prepared);
+  }
+
+  /**
+   * I4 cancel: Hub-side terminalization with the existing hub-action path
+   * carrying the daemon interrupt (deriveHubAction → "interrupt" for a live
+   * daemon-attached execution). The authority transition is committed by the
+   * convergence machine before this runs.
+   */
+  async cancelAgentExecution(executionId: string): Promise<void> {
+    await this.failAgentExecution(executionId, "operator_cancelled");
   }
 
   async notifyWorkflowRunAccepted(
@@ -642,6 +675,10 @@ export class DaemonDispatchLifecycle {
     daemonId: string,
     event: DaemonEvent,
   ): Promise<void> {
+    // I3: fold the signal into authority state first (serialized per execution
+    // by queueDaemonEvent; the machine swallows its own errors — convergence
+    // never blocks Hub's own event handling).
+    await this.options.executionConvergence?.observeDaemonEvent(executionId, daemonId, event);
     if (event.type === "agent_stream") {
       const observedAt = new Date(event.timestamp);
       if (event.event.type === "timeline" && event.event.item.type === "tool_call") {
@@ -1203,6 +1240,7 @@ export class DaemonDispatchLifecycle {
         failureReason: reason,
         ...(details.deadlineKind === undefined ? {} : { deadlineKind: details.deadlineKind }),
       },
+      { hubReason: reason },
     );
     if (!transition.transitioned) {
       if (isTerminalExecutionStatus(transition.execution.status)) {
@@ -1232,9 +1270,31 @@ export class DaemonDispatchLifecycle {
     status: "succeeded" | "failed",
     fields: TransitionAgentExecutionFields,
     workflow: Pick<WorkflowAgentCompletionInput, "stepStatus" | "stepOutput" | "failureReason">,
+    convergence?: { hubReason?: string },
   ): Promise<TransitionAgentExecutionResult> {
     const execution = await this.options.database.findAgentExecutionById(executionId);
     if (execution === undefined) throw new Error(`agent execution not found: ${executionId}`);
+    // I3 funnel: every Hub-local terminal transition commits the ANVIL
+    // authority transition first. Fails closed — an authority outage aborts
+    // the Hub-local flip rather than forking truth (unbound executions no-op).
+    if (
+      this.options.executionConvergence !== undefined &&
+      !isTerminalExecutionStatus(execution.status)
+    ) {
+      // When completion was reported through hub.finish_execution, name that
+      // call in the cause ref — the authority chain then shows which agent
+      // call produced the terminal state, not just the Hub funnel.
+      const finishCallId = execution.hubActionAcknowledgements.finishExecutionCall?.callId;
+      await this.options.executionConvergence.observeTerminalIntent({
+        executionId,
+        to: status,
+        ...(convergence?.hubReason === undefined ? {} : { hubReason: convergence.hubReason }),
+        causeRef:
+          status === "succeeded" && finishCallId !== null && finishCallId !== undefined
+            ? `hub:terminal:${executionId}:${status}:finish:${finishCallId}`
+            : `hub:terminal:${executionId}:${status}`,
+      });
+    }
     if (execution.workflowStepRunId !== null) {
       return this.options.database.completeWorkflowAgentExecution({
         executionId,
