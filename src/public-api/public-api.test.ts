@@ -327,6 +327,8 @@ describe("Room projection routes", () => {
             latest_seq: 4,
             next_cursor: 2,
             has_more: true,
+            observed_at: "2026-09-19T12:00:00.000Z",
+            stale: false,
           });
         },
       },
@@ -622,7 +624,13 @@ function successfulOperations(): PublicOperations {
         token: "a".repeat(43),
         expiresAt: new Date("2026-08-06T18:10:00.000Z"),
       }),
-    listRooms: () => Promise.resolve({ status: "listed", rooms: [projectedRoom()] }),
+    listRooms: () =>
+      Promise.resolve({
+        status: "listed",
+        rooms: [projectedRoom()],
+        observed_at: "2026-09-19T12:00:00.000Z",
+        stale: false,
+      }),
     getRoomSnapshot: () =>
       Promise.resolve({
         status: "ok",
@@ -637,6 +645,8 @@ function successfulOperations(): PublicOperations {
             joined_at: "2026-09-15T00:00:00.000Z",
           },
         ],
+        observed_at: "2026-09-19T12:00:00.000Z",
+        stale: false,
       }),
     replayRoomEvents: () =>
       Promise.resolve({
@@ -659,10 +669,34 @@ function successfulOperations(): PublicOperations {
             occurred_at: "2026-09-15T00:00:01.000Z",
             created_at: "2026-09-15T00:00:01.000Z",
           },
+          {
+            event_id: "945e9d26-7977-45e1-bc69-d80a7b55a9cd",
+            room_id: "84af3583-23ff-4fcc-9838-ed3262499be2",
+            room_seq: 5,
+            kind: "sieve.projection",
+            producer: "service:sieve-projector",
+            payload: {
+              observed_at: "2026-09-19T11:00:00.000Z",
+              source: "sieve:8899/dashboard/data",
+              digest: "sha256:abc",
+              stale_after_ms: 15000,
+            },
+            link: {},
+            correlation_id: "f83dc934-02a0-4849-8de7-699110be24ed",
+            causation_id: null,
+            task_ref: null,
+            campaign_id: null,
+            idempotency_key: "sieve-projector:5",
+            occurred_at: "2026-09-19T11:00:00.000Z",
+            created_at: "2026-09-19T11:00:01.000Z",
+            freshness: { observed_at: "2026-09-19T11:00:00.000Z", stale: true },
+          },
         ],
-        latest_seq: 4,
-        next_cursor: 4,
+        latest_seq: 5,
+        next_cursor: 5,
         has_more: false,
+        observed_at: "2026-09-19T12:00:00.000Z",
+        stale: false,
       }),
   };
 }

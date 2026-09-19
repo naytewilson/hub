@@ -354,7 +354,11 @@ function operationResponse(
 function roomsResponse(requestId: string, result: ListRoomsResult): Response {
   switch (result.status) {
     case "listed":
-      return success(requestId, 200, RoomListSchema, { rooms: result.rooms });
+      return success(requestId, 200, RoomListSchema, {
+        rooms: result.rooms,
+        observed_at: result.observed_at,
+        stale: result.stale,
+      });
     case "room_projection_unavailable":
       return roomProjectionUnavailableProblem(requestId);
     case "infrastructure_unavailable":
@@ -369,6 +373,8 @@ function roomSnapshotResponse(requestId: string, result: GetRoomSnapshotResult):
       return success(requestId, 200, RoomSnapshotSchema, {
         room: result.room,
         participants: result.participants,
+        observed_at: result.observed_at,
+        stale: result.stale,
       });
     case "room_not_found":
       return problem(
@@ -397,6 +403,8 @@ function roomEventsResponse(requestId: string, result: ReplayRoomEventsResult): 
         latest_seq: result.latest_seq,
         next_cursor: result.next_cursor,
         has_more: result.has_more,
+        observed_at: result.observed_at,
+        stale: result.stale,
       });
     case "room_not_found":
       return problem(

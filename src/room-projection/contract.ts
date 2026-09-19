@@ -18,6 +18,14 @@
 
 export const ROOM_READ_CAPABILITY = "room.read" as const;
 
+/**
+ * Event kinds minted by the authority plane when this contract was written.
+ * The taxonomy is authority-owned and grows (I1 spine kinds, I2
+ * `sieve.projection`, I3 `execution.transition`, …); the projection passes
+ * `kind` through as a string and never refuses an unknown value — throwing on
+ * a new authority kind would make the projection fragile to authority
+ * evolution it does not control.
+ */
 export const ROOM_EVENT_KINDS = [
   "message",
   "handoff",
@@ -27,6 +35,36 @@ export const ROOM_EVENT_KINDS = [
   "system",
 ] as const;
 export type RoomEventKind = (typeof ROOM_EVENT_KINDS)[number];
+
+/**
+ * Room event kind emitted by the ANVIL SIEVE projection writer (anvil repo,
+ * owner i1). Its payload carries `{observed_at, source, digest,
+ * stale_after_ms}` — Hub computes `freshness` from it at serve time.
+ */
+export const SIEVE_PROJECTION_EVENT_KIND = "sieve.projection" as const;
+
+/**
+ * Hub-computed freshness annotation attached at serve time — never
+ * authority-minted. `observed_at` is when the underlying observation was
+ * taken; `stale` is `now > observed_at + budget` evaluated when the response
+ * is built, so the same stored event flips stale as it ages.
+ */
+export interface EventFreshness {
+  /** ISO-8601 observation stamp, or null when the writer's was unparseable. */
+  observed_at: string | null;
+  stale: boolean;
+}
+
+/**
+ * A read result plus the moment the authority state backing it was observed.
+ * For the Postgres transport this is query completion; for the Neo read API
+ * transport it is the service's own `observed_at` stamp (the service may serve
+ * a Neo-side snapshot), falling back to response receipt time.
+ */
+export interface ObservedRead<T> {
+  value: T;
+  observed_at: string;
+}
 
 export const ROOM_STATUSES = ["active", "archived", "closed"] as const;
 export type RoomStatus = (typeof ROOM_STATUSES)[number];
@@ -136,7 +174,13 @@ export interface ProjectedRoomEvent {
   /** `anvil.rooms.public_id` — the owning room's wire identity. */
   room_id: string;
   room_seq: number;
-  kind: RoomEventKind;
+  /**
+   * Authority-minted event kind, passed through unchanged. Known values are
+   * enumerated in {@link ROOM_EVENT_KINDS}; the authority taxonomy grows over
+   * time (e.g. {@link SIEVE_PROJECTION_EVENT_KIND}) and the projection must
+   * never reject a kind it does not recognize.
+   */
+  kind: string;
   /** Server-stamped producer form (`agent:<uuid>` | `service:<…>` | `operator:<…>` | `machine:<…>`). */
   producer: string;
   payload: Record<string, unknown>;
@@ -154,4 +198,9 @@ export interface ProjectedRoomEvent {
   occurred_at: string | null;
   /** Authority stamp — ordering with room_seq. */
   created_at: string;
+  /**
+   * Hub-computed freshness, present only on kinds that carry an observation
+   * contract (today: {@link SIEVE_PROJECTION_EVENT_KIND}). Absent elsewhere.
+   */
+  freshness?: EventFreshness;
 }

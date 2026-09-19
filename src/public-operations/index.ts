@@ -15,7 +15,15 @@ import type {
   PublicOperationRepository,
   PublicOperations,
 } from "./types.js";
-import { RoomCapabilityDeniedError, RoomNotFoundError } from "../room-projection/index.js";
+import {
+  RoomCapabilityDeniedError,
+  RoomNotFoundError,
+  SIEVE_PROJECTION_EVENT_KIND,
+  type EventFreshness,
+  type ObservedRead,
+  type ProjectedRoomEvent,
+  type RoomAuthoritySource,
+} from "../room-projection/index.js";
 import { TriggerDocumentError } from "../triggers/configuration/index.js";
 
 export type * from "./types.js";
@@ -231,7 +239,12 @@ export function createPublicOperations(
       const authority = capabilities.roomAuthority;
       if (authority === undefined) return { status: "room_projection_unavailable" };
       try {
-        return { status: "listed", rooms: await authority.reader.listReadableRooms() };
+        const read = await authority.reader.listReadableRooms();
+        return {
+          status: "listed",
+          rooms: read.value,
+          ...projectionEnvelope(read, authority, clock),
+        };
       } catch (error) {
         return storageUnavailableOrThrow(error);
       }
@@ -241,7 +254,12 @@ export function createPublicOperations(
       if (authority === undefined) return { status: "room_projection_unavailable" };
       try {
         const snapshot = await authority.reader.readSnapshot(input.roomId);
-        return { status: "ok", room: snapshot.room, participants: snapshot.participants };
+        return {
+          status: "ok",
+          room: snapshot.value.room,
+          participants: snapshot.value.participants,
+          ...projectionEnvelope(snapshot, authority, clock),
+        };
       } catch (error) {
         return roomReadErrorOrThrow(error);
       }
@@ -251,20 +269,90 @@ export function createPublicOperations(
       if (authority === undefined) return { status: "room_projection_unavailable" };
       try {
         const page = await authority.reader.replayEvents(input.roomId, input.after, input.limit);
-        const lastSeq = page.events[page.events.length - 1]?.room_seq ?? input.after;
+        const lastSeq = page.value.events[page.value.events.length - 1]?.room_seq ?? input.after;
         return {
           status: "ok",
-          room: page.room,
-          events: page.events,
-          latest_seq: page.latestSeq,
+          room: page.value.room,
+          events: page.value.events.map((event) => annotateEventFreshness(event, clock)),
+          latest_seq: page.value.latestSeq,
           next_cursor: lastSeq,
-          has_more: page.latestSeq > lastSeq,
+          has_more: page.value.latestSeq > lastSeq,
+          ...projectionEnvelope(page, authority, clock),
         };
       } catch (error) {
         return roomReadErrorOrThrow(error);
       }
     },
   };
+}
+
+/**
+ * Envelope freshness for a projection response (I2/D5). `observed_at` passes
+ * through the seam's observation stamp unchanged; `stale` is recomputed at
+ * serve time against the seam's configured budget. An unparseable stamp is
+ * reported stale — an observation we cannot date is never claimed fresh.
+ */
+function projectionEnvelope(
+  read: ObservedRead<unknown>,
+  authority: RoomAuthoritySource,
+  clock: DaemonClock,
+): { observed_at: string; stale: boolean } {
+  const observedMs = Date.parse(read.observed_at);
+  return {
+    observed_at: read.observed_at,
+    stale: Number.isNaN(observedMs)
+      ? true
+      : clock.nowDate().getTime() - observedMs > authority.staleAfterMs,
+  };
+}
+
+/**
+ * Serve-time freshness annotation for event kinds that carry an observation
+ * contract — today `sieve.projection`, whose payload is
+ * `{observed_at, source, digest, stale_after_ms}` (absolute-deadline
+ * `stale_after` timestamps are also accepted). The stored event is never
+ * mutated; this projects a computed view so the same event flips stale as it
+ * ages. A projection event whose freshness cannot be evaluated is reported
+ * stale — fail-honest, never silently fresh.
+ */
+function annotateEventFreshness(event: ProjectedRoomEvent, clock: DaemonClock): ProjectedRoomEvent {
+  if (event.kind !== SIEVE_PROJECTION_EVENT_KIND) return event;
+  return { ...event, freshness: sieveProjectionFreshness(event.payload, clock) };
+}
+
+function sieveProjectionFreshness(
+  payload: Record<string, unknown>,
+  clock: DaemonClock,
+): EventFreshness {
+  const observedRaw = payload["observed_at"];
+  const observedMs = typeof observedRaw === "string" ? Date.parse(observedRaw) : Number.NaN;
+  if (Number.isNaN(observedMs)) return { observed_at: null, stale: true };
+  const deadlineMs = sieveStaleDeadlineMs(payload, observedMs);
+  return {
+    observed_at: new Date(observedMs).toISOString(),
+    stale: deadlineMs === undefined ? true : clock.nowDate().getTime() > deadlineMs,
+  };
+}
+
+/**
+ * The writer-declared freshness deadline for a sieve.projection payload:
+ * `stale_after_ms` (duration after observed_at, canonical) or `stale_after`
+ * (absolute ISO timestamp, or a number treated as a duration for tolerance).
+ */
+function sieveStaleDeadlineMs(
+  payload: Record<string, unknown>,
+  observedMs: number,
+): number | undefined {
+  const duration = payload["stale_after_ms"] ?? payload["stale_after"];
+  if (typeof duration === "number" && Number.isFinite(duration) && duration >= 0) {
+    return observedMs + duration;
+  }
+  const absolute = payload["stale_after"];
+  if (typeof absolute === "string") {
+    const parsed = Date.parse(absolute);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return undefined;
 }
 
 function roomReadErrorOrThrow(

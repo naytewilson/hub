@@ -4,7 +4,9 @@ import { DatabaseUnavailableError } from "../db/errors.js";
 import {
   RoomCapabilityDeniedError,
   RoomNotFoundError,
+  type ObservedRead,
   type ProjectedRoom,
+  type ProjectedRoomEvent,
   type RoomAuthorityReader,
   type RoomAuthoritySource,
   type RoomEventPage,
@@ -18,6 +20,8 @@ import type {
 } from "./types.js";
 
 const ROOM_ID = "84af3583-23ff-4fcc-9838-ed3262499be2";
+const NOW = new Date("2026-09-19T12:00:00.000Z");
+const OBSERVED = "2026-09-19T11:59:59.000Z";
 
 const authorization: PublicAuthorization = {
   kind: "apiKey",
@@ -36,6 +40,12 @@ const room: ProjectedRoom = {
   updated_at: "2026-09-15T00:00:00.000Z",
 };
 
+const clock = { nowDate: () => NOW };
+
+function observed<T>(value: T, at: string = OBSERVED): ObservedRead<T> {
+  return { value, observed_at: at };
+}
+
 describe("public room operations", () => {
   it("answers room_projection_unavailable on every operation when the seam is unconfigured", async () => {
     const operations = createPublicOperations(unusedRepository(), baseCapabilities());
@@ -52,23 +62,29 @@ describe("public room operations", () => {
   });
 
   it("delegates to the bound reader and derives next_cursor and has_more from authority seq", async () => {
-    const operations = createPublicOperations(unusedRepository(), {
-      ...baseCapabilities(),
-      roomAuthority: sourceFor({
-        listReadableRooms: () => Promise.resolve([room]),
-        readSnapshot: () => Promise.resolve<RoomSnapshot>({ room, participants: [] }),
-        replayEvents: (roomId, after, limit) => {
-          assert.equal(roomId, ROOM_ID);
-          assert.equal(after, 3);
-          assert.equal(limit, 2);
-          return Promise.resolve<RoomEventPage>({
-            room,
-            latestSeq: 9,
-            events: [eventAt(4), eventAt(5)],
-          });
-        },
-      }),
-    });
+    const operations = createPublicOperations(
+      unusedRepository(),
+      {
+        ...baseCapabilities(),
+        roomAuthority: sourceFor({
+          listReadableRooms: () => Promise.resolve(observed([room])),
+          readSnapshot: () => Promise.resolve(observed<RoomSnapshot>({ room, participants: [] })),
+          replayEvents: (roomId, after, limit) => {
+            assert.equal(roomId, ROOM_ID);
+            assert.equal(after, 3);
+            assert.equal(limit, 2);
+            return Promise.resolve(
+              observed<RoomEventPage>({
+                room,
+                latestSeq: 9,
+                events: [eventAt(4), eventAt(5)],
+              }),
+            );
+          },
+        }),
+      },
+      clock,
+    );
 
     const listed = await operations.listRooms(authorization);
     assert.equal(listed.status, "listed");
@@ -90,12 +106,17 @@ describe("public room operations", () => {
   });
 
   it("holds the cursor when a replay page is empty", async () => {
-    const operations = createPublicOperations(unusedRepository(), {
-      ...baseCapabilities(),
-      roomAuthority: sourceFor({
-        replayEvents: () => Promise.resolve<RoomEventPage>({ room, latestSeq: 9, events: [] }),
-      }),
-    });
+    const operations = createPublicOperations(
+      unusedRepository(),
+      {
+        ...baseCapabilities(),
+        roomAuthority: sourceFor({
+          replayEvents: () =>
+            Promise.resolve(observed<RoomEventPage>({ room, latestSeq: 9, events: [] })),
+        }),
+      },
+      clock,
+    );
     const page = await operations.replayRoomEvents(authorization, {
       roomId: ROOM_ID,
       after: 9,
@@ -136,14 +157,176 @@ describe("public room operations", () => {
       /unexpected invariant break/u,
     );
   });
+
+  it("carries observed_at and computes stale against the seam budget on every response", async () => {
+    const operations = createPublicOperations(
+      unusedRepository(),
+      {
+        ...baseCapabilities(),
+        roomAuthority: sourceFor({
+          listReadableRooms: () => Promise.resolve(observed([room])),
+          readSnapshot: () => Promise.resolve(observed<RoomSnapshot>({ room, participants: [] })),
+          replayEvents: () =>
+            Promise.resolve(observed<RoomEventPage>({ room, latestSeq: 5, events: [eventAt(5)] })),
+        }),
+      },
+      clock,
+    );
+
+    const listed = await operations.listRooms(authorization);
+    assert.equal(listed.status, "listed");
+    if (listed.status !== "listed") throw new Error("unreachable");
+    assert.equal(listed.observed_at, OBSERVED);
+    assert.equal(listed.stale, false); // 1s old vs 30s budget
+
+    const snapshot = await operations.getRoomSnapshot(authorization, { roomId: ROOM_ID });
+    assert.equal(snapshot.status, "ok");
+    if (snapshot.status !== "ok") throw new Error("unreachable");
+    assert.equal(snapshot.observed_at, OBSERVED);
+    assert.equal(snapshot.stale, false);
+
+    const page = await operations.replayRoomEvents(authorization, {
+      roomId: ROOM_ID,
+      after: 0,
+      limit: 10,
+    });
+    assert.equal(page.status, "ok");
+    if (page.status !== "ok") throw new Error("unreachable");
+    assert.equal(page.observed_at, OBSERVED);
+    assert.equal(page.stale, false);
+  });
+
+  it("reports stale when the observation outlives the budget or cannot be dated", async () => {
+    const aged = "2026-09-19T11:00:00.000Z"; // 60min old vs 30s budget
+    for (const stamp of [aged, "not-a-timestamp"]) {
+      const operations = createPublicOperations(
+        unusedRepository(),
+        {
+          ...baseCapabilities(),
+          roomAuthority: sourceFor({
+            listReadableRooms: () => Promise.resolve(observed([room], stamp)),
+          }),
+        },
+        clock,
+      );
+      const listed = await operations.listRooms(authorization);
+      assert.equal(listed.status, "listed");
+      if (listed.status !== "listed") throw new Error("unreachable");
+      assert.equal(listed.observed_at, stamp);
+      assert.equal(listed.stale, true, stamp);
+    }
+  });
+
+  it("annotates sieve.projection events with serve-time freshness and leaves other kinds untouched", async () => {
+    const sieveEvent = {
+      ...eventAt(5),
+      kind: "sieve.projection",
+      payload: {
+        observed_at: "2026-09-19T11:59:50.000Z",
+        source: "sieve:8899/dashboard/data",
+        digest: "sha256:abc",
+        stale_after_ms: 15_000,
+      },
+    };
+    const agedSieveEvent = {
+      ...eventAt(4),
+      kind: "sieve.projection",
+      payload: {
+        observed_at: "2026-09-19T11:00:00.000Z",
+        source: "sieve:8899/dashboard/data",
+        digest: "sha256:def",
+        stale_after_ms: 15_000,
+      },
+    };
+    const operations = createPublicOperations(
+      unusedRepository(),
+      {
+        ...baseCapabilities(),
+        roomAuthority: sourceFor({
+          replayEvents: () =>
+            Promise.resolve(
+              observed<RoomEventPage>({
+                room,
+                latestSeq: 5,
+                events: [eventAt(3), agedSieveEvent, sieveEvent],
+              }),
+            ),
+        }),
+      },
+      clock,
+    );
+
+    const page = await operations.replayRoomEvents(authorization, {
+      roomId: ROOM_ID,
+      after: 0,
+      limit: 10,
+    });
+    assert.equal(page.status, "ok");
+    if (page.status !== "ok") throw new Error("unreachable");
+
+    const [plain, aged, fresh] = page.events;
+    assert.equal(plain?.freshness, undefined);
+    assert.deepEqual(aged?.freshness, {
+      observed_at: "2026-09-19T11:00:00.000Z",
+      stale: true,
+    });
+    assert.deepEqual(fresh?.freshness, {
+      observed_at: "2026-09-19T11:59:50.000Z",
+      stale: false,
+    });
+  });
+
+  it("marks sieve.projection events stale when the freshness contract is unparseable", async () => {
+    const missing = { ...eventAt(4), kind: "sieve.projection", payload: { source: "sieve" } };
+    const badStamp = {
+      ...eventAt(5),
+      kind: "sieve.projection",
+      payload: { observed_at: "nonsense", stale_after_ms: 1000 },
+    };
+    const noBudget = {
+      ...eventAt(6),
+      kind: "sieve.projection",
+      payload: { observed_at: "2026-09-19T11:59:59.000Z" },
+    };
+    const operations = createPublicOperations(
+      unusedRepository(),
+      {
+        ...baseCapabilities(),
+        roomAuthority: sourceFor({
+          replayEvents: () =>
+            Promise.resolve(
+              observed<RoomEventPage>({
+                room,
+                latestSeq: 6,
+                events: [missing, badStamp, noBudget],
+              }),
+            ),
+        }),
+      },
+      clock,
+    );
+
+    const page = await operations.replayRoomEvents(authorization, {
+      roomId: ROOM_ID,
+      after: 0,
+      limit: 10,
+    });
+    if (page.status !== "ok") throw new Error("unreachable");
+    assert.deepEqual(page.events[0]?.freshness, { observed_at: null, stale: true });
+    assert.deepEqual(page.events[1]?.freshness, { observed_at: null, stale: true });
+    assert.deepEqual(page.events[2]?.freshness, {
+      observed_at: "2026-09-19T11:59:59.000Z",
+      stale: true,
+    });
+  });
 });
 
-function eventAt(seq: number) {
+function eventAt(seq: number): ProjectedRoomEvent {
   return {
     event_id: "845e9d26-7977-45e1-bc69-d80a7b55a9cc",
     room_id: ROOM_ID,
     room_seq: seq,
-    kind: "message" as const,
+    kind: "message",
     producer: "agent:f83dc934-02a0-4849-8de7-699110be24ed",
     payload: {},
     link: {},
@@ -161,6 +344,7 @@ function sourceFor(reader: Partial<RoomAuthorityReader>): RoomAuthoritySource {
   const unimplemented = () => Promise.reject(new Error("not used by this test"));
   return {
     subject: { kind: "device", subjectRef: "machine:test" },
+    staleAfterMs: 30_000,
     reader: {
       listReadableRooms: reader.listReadableRooms ?? unimplemented,
       readSnapshot: reader.readSnapshot ?? unimplemented,

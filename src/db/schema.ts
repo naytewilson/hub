@@ -684,6 +684,14 @@ export const organizationCliCredentials = pgTable(
   ],
 );
 
+/**
+ * Hub-internal workflow execution bookkeeping — a PROJECTION, never authority.
+ * Under the ANVIL nervous-system model (campaign anvil-i17, demotion F2) the
+ * single durable authority for execution state is Neo `anvil_core`
+ * (`room_events` / `execution_bindings`); this table records what this Hub
+ * instance dispatched and observed, and must never be cited as the source of
+ * truth for execution identity. Documented demotion — the table stays.
+ */
 export const agentExecutions = pgTable(
   "agent_executions",
   {

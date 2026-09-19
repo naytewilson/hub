@@ -2,14 +2,13 @@ import { toDatabaseError } from "../db/errors.js";
 import type { QueryHandle, QueryRow } from "../db/runtime/index.js";
 import {
   anvilSubjectLabel,
-  ROOM_EVENT_KINDS,
   ROOM_READ_CAPABILITY,
   ROOM_STATUSES,
   type AnvilRoomSubject,
+  type ObservedRead,
   type ProjectedRoom,
   type ProjectedRoomEvent,
   type ProjectedRoomParticipant,
-  type RoomEventKind,
   type RoomStatus,
 } from "./contract.js";
 
@@ -100,16 +99,20 @@ export interface RoomEventPage {
  */
 export interface RoomAuthorityReader {
   /** Rooms the bound subject can read (global or room-scoped room.read). */
-  listReadableRooms(): Promise<readonly ProjectedRoom[]>;
+  listReadableRooms(): Promise<ObservedRead<readonly ProjectedRoom[]>>;
   /** Room + active participants; 404/403 semantics preserved. */
-  readSnapshot(roomPublicId: string): Promise<RoomSnapshot>;
+  readSnapshot(roomPublicId: string): Promise<ObservedRead<RoomSnapshot>>;
   /**
    * Deterministic cursor replay: committed events with `room_seq > after`,
    * authority order, bounded by `limit`. Re-issuing the same cursor yields
    * the same event sequence for unchanged authority state; duplicated rows
    * collapse on (room_id, room_seq) so projection stays idempotent.
    */
-  replayEvents(roomPublicId: string, after: number, limit: number): Promise<RoomEventPage>;
+  replayEvents(
+    roomPublicId: string,
+    after: number,
+    limit: number,
+  ): Promise<ObservedRead<RoomEventPage>>;
 }
 
 export function createRoomAuthorityReader(
@@ -220,7 +223,9 @@ export function createRoomAuthorityReader(
       // grants cover only their scope_room_id. Same predicate as
       // subjectHoldsRead, expressed per row so one query returns the visible set.
       const agentId = subject.kind === "agent" ? await agentInternalId() : undefined;
-      if (subject.kind === "agent" && agentId === undefined) return [];
+      if (subject.kind === "agent" && agentId === undefined) {
+        return { value: [], observed_at: new Date().toISOString() };
+      }
       const grantPredicate =
         subject.kind === "agent"
           ? `g.subject_kind = 'agent' AND g.subject_agent_id = $1 AND g.capability = $2`
@@ -245,7 +250,10 @@ export function createRoomAuthorityReader(
          ORDER BY r.created_at ASC, r.id ASC`,
         binds,
       );
-      return rows.map((row) => projectRoom({ ...row, id: toInt(row.id) }, toInt(row.latest_seq)));
+      const value = rows.map((row) =>
+        projectRoom({ ...row, id: toInt(row.id) }, toInt(row.latest_seq)),
+      );
+      return { value, observed_at: new Date().toISOString() };
     },
 
     async readSnapshot(roomPublicId) {
@@ -259,7 +267,7 @@ export function createRoomAuthorityReader(
          ORDER BY p.id`,
         [room.id],
       );
-      return {
+      const value: RoomSnapshot = {
         room: projectRoom(room, await latestCommittedSeq(room.id)),
         participants: participants.map((row) => ({
           participant_id: toText(row.participant_id),
@@ -270,6 +278,7 @@ export function createRoomAuthorityReader(
           joined_at: toTimestamp(row.joined_at),
         })),
       };
+      return { value, observed_at: new Date().toISOString() };
     },
 
     async replayEvents(roomPublicId, after, limit) {
@@ -285,7 +294,7 @@ export function createRoomAuthorityReader(
       // that invariant so a re-delivered row can never become duplicate
       // semantic state.
       const seen = new Set<number>();
-      return {
+      const value: RoomEventPage = {
         room: projectRoom(room, latestSeq),
         latestSeq,
         events: events
@@ -296,6 +305,7 @@ export function createRoomAuthorityReader(
             return true;
           }),
       };
+      return { value, observed_at: new Date().toISOString() };
     },
   };
 
@@ -332,7 +342,7 @@ function projectEvent(row: EventRow, roomId: string): ProjectedRoomEvent {
     event_id: toText(row.event_id),
     room_id: roomId,
     room_seq: toInt(row.room_seq),
-    kind: toEventKind(row.kind),
+    kind: toText(row.kind),
     producer: toText(row.producer),
     payload: toJsonObject(row.payload),
     link: toJsonObject(row.link),
@@ -386,15 +396,6 @@ function toJsonObject(value: unknown): Record<string, unknown> {
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function toEventKind(value: unknown): RoomEventKind {
-  const text = toText(value);
-  const kind = ROOM_EVENT_KINDS.find((candidate) => candidate === text);
-  if (kind === undefined) {
-    throw new Error(`ANVIL Room event carried an unknown kind: ${text}`);
-  }
-  return kind;
 }
 
 function toRoomStatus(value: unknown): RoomStatus {
