@@ -31,6 +31,7 @@ export interface ControlInvocationInput {
   idempotencyKey: string;
   correlationId?: string | undefined;
   executionId?: string | undefined;
+  attentionKind?: "terminal" | "idle" | "finish_execution_call" | undefined;
 }
 
 export type ControlOutcome =
@@ -81,12 +82,26 @@ export async function checkControlCapability(
   return allowed ? { allowed: true } : { allowed: false, capability };
 }
 
+function acknowledgementKind(effect: unknown): string | undefined {
+  if (typeof effect !== "object" || effect === null) return undefined;
+  const acknowledgement = (effect as Record<string, unknown>)["acknowledgement"];
+  if (typeof acknowledgement !== "object" || acknowledgement === null) return undefined;
+  const kind = (acknowledgement as Record<string, unknown>)["kind"];
+  return typeof kind === "string" ? kind : undefined;
+}
+
 export function replayOrConflict(
   existing: ControlOperationRecord,
   op: ControlOp,
-  executionId: string | undefined,
+  input: ControlInvocationInput,
 ): Extract<ControlExecutionResult, { status: "replayed" | "idempotency_key_conflict" }> {
-  if (existing.op === op && existing.executionId === (executionId ?? null)) {
+  const sameTarget =
+    existing.op === op &&
+    existing.executionId === (input.executionId ?? null) &&
+    (op !== "acknowledge" ||
+      input.attentionKind === undefined ||
+      acknowledgementKind(existing.effect) === input.attentionKind);
+  if (sameTarget) {
     return {
       status: "replayed",
       operation: { ...toControlOperationWire(existing), replayed: true as const },
@@ -120,6 +135,15 @@ export async function invokeControlOperation(
   const issues = validateControlInput(input);
   if (issues.length > 0) return { status: "invalid_input", issues };
 
+  // Frozen V1 ordering: idempotency replay precedes the ANVIL capability
+  // check. Replaying an operation that already executed under valid authority
+  // exercises no new authority and must continue to work when the authority
+  // seam is temporarily unavailable or the original grant later expires.
+  const prior = await repository.findControlOperationByKey(organizationId, input.idempotencyKey);
+  if (prior !== undefined) {
+    return replayOrConflict(prior, op, input);
+  }
+
   const authority = resolveControlAuthority(capabilities);
   if (authority === undefined) return { status: "control_plane_unavailable" };
 
@@ -133,17 +157,9 @@ export async function invokeControlOperation(
       ? undefined
       : await repository.findAgentExecution(organizationId, input.executionId);
 
-  // Idempotency first: a replayed key returns the stored operation without
-  // re-executing any effect. The unique (organization_id, idempotency_key)
-  // constraint remains the race backstop for concurrent duplicates.
-  const prior = await repository.findControlOperationByKey(organizationId, input.idempotencyKey);
-  if (prior !== undefined) {
-    return replayOrConflict(prior, op, input.executionId);
-  }
-
   const outcome = await execute(target);
   if (outcome.status === "replay_stored") {
-    return replayOrConflict(outcome.existing, op, input.executionId);
+    return replayOrConflict(outcome.existing, op, input);
   }
   if (outcome.status !== "ok") return outcome;
 
@@ -161,7 +177,7 @@ export async function invokeControlOperation(
   if (inserted) {
     return { status: outcome.durability, operation: toControlOperationWire(record) };
   }
-  return replayOrConflict(record, op, input.executionId);
+  return replayOrConflict(record, op, input);
 }
 
 /** Builds the Hub acknowledgement input for the attention kinds the control plane owns. */
