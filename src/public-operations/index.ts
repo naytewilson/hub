@@ -30,6 +30,7 @@ import {
   checkControlCapability,
   invokeControlOperation,
   replayOrConflict,
+  replayStartOrConflict,
   resolveControlAuthority,
   toHubAcknowledgement,
   validateStartApprovedExecutionInput,
@@ -308,10 +309,10 @@ export function createPublicOperations(
           input,
           async (target) => {
             if (target === undefined) return { status: "execution_not_found" };
-            if (target.status === "spawning" || target.status === "running") {
+            if (target.status !== "failed") {
               return {
                 status: "control_precondition_failed",
-                reason: "execution_already_live",
+                reason: "execution_not_failed",
               };
             }
             return {
@@ -376,10 +377,10 @@ export function createPublicOperations(
           input,
           async (target) => {
             if (target === undefined) return { status: "execution_not_found" };
-            if (target.status === "spawning" || target.status === "running") {
+            if (target.status !== "failed") {
               return {
                 status: "control_precondition_failed",
-                reason: "execution_still_live",
+                reason: "execution_not_failed",
               };
             }
             return {
@@ -435,19 +436,21 @@ export function createPublicOperations(
       try {
         const issues = validateStartApprovedExecutionInput(input);
         if (issues.length > 0) return { status: "invalid_input", issues };
-        const authority = resolveControlAuthority(capabilities);
-        if (authority === undefined) return { status: "control_plane_unavailable" };
-        const check = await checkControlCapability(authority, "execution_start");
-        if (!check.allowed) {
-          return { status: "control_capability_denied", capability: check.capability };
-        }
         const organizationId = authorization.organizationId;
+        // Same frozen ordering as the execution-targeted controls: replay
+        // first, authority check only for a genuinely new mutation.
         const existing = await repository.findControlOperationByKey(
           organizationId,
           input.idempotencyKey,
         );
         if (existing !== undefined) {
-          return replayOrConflict(existing, "execution_start", undefined);
+          return replayStartOrConflict(existing, input);
+        }
+        const authority = resolveControlAuthority(capabilities);
+        if (authority === undefined) return { status: "control_plane_unavailable" };
+        const check = await checkControlCapability(authority, "execution_start");
+        if (!check.allowed) {
+          return { status: "control_capability_denied", capability: check.capability };
         }
         const project = await repository.resolveManualRunProject(
           organizationId,
@@ -495,6 +498,13 @@ export function createPublicOperations(
           providerEventReceiptId: dispatch.providerEventReceiptId,
           triggerRunId: dispatch.triggerRunId,
           configuredTriggerName: dispatch.configuredTriggerName,
+          // Durable replay target: a reused key may only replay the exact
+          // approved start target. Different project/trigger/version is 409.
+          requestTarget: {
+            trigger: input.trigger,
+            projectSlug: input.projectSlug,
+            expectedVersionId: input.expectedVersionId ?? null,
+          },
         };
         const { inserted, record } = await repository.insertControlOperation({
           organizationId,
@@ -510,14 +520,15 @@ export function createPublicOperations(
         if (inserted) {
           return { status: "applied", operation: toControlOperationWire(record) };
         }
-        return replayOrConflict(record, "execution_start", undefined);
+        return replayStartOrConflict(record, input);
       } catch (error) {
         return storageUnavailableOrThrow(error);
       }
     },
     async getControlOperation(authorization, input) {
-      const authority = resolveControlAuthority(capabilities);
-      if (authority === undefined) return { status: "control_plane_unavailable" };
+      // Hub-owned durable ledger projection. Transport scope controls:read is
+      // enforced by the public API manifest; ANVIL liveness is not required
+      // to read an already-recorded operation.
       try {
         const record = await repository.findControlOperationById(
           authorization.organizationId,
@@ -530,8 +541,8 @@ export function createPublicOperations(
       }
     },
     async listControlOperations(authorization, input) {
-      const authority = resolveControlAuthority(capabilities);
-      if (authority === undefined) return { status: "control_plane_unavailable" };
+      // Same recovery property as getControlOperation: the Hub ledger remains
+      // readable while the external authority seam is degraded.
       try {
         const records = await repository.listControlOperations(authorization.organizationId, {
           ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
