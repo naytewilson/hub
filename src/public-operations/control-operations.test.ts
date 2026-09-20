@@ -1010,11 +1010,12 @@ describe("control operations", () => {
     const pending = [...repository.opsById.values()][0];
     assert.equal(pending?.status, "recorded");
 
-    // A fresh operations surface with NO current ANVIL authority can resume
-    // the already-authorized durable claim, but must use the STORED request.
+    // A fresh operations surface can resume the crash-recovery claim only
+    // while the current bound subject still holds execution-start authority.
     const recoveredSurface = createPublicOperations(repository, {
       ...baseCapabilities(),
       dispatchManualEvent,
+      roomAuthority: makeAuthority(ALL_CONTROL_CAPABILITIES),
     });
     const recovered = await recoveredSurface.startApprovedExecution(authorization, {
       idempotencyKey: "start-crash-window",
@@ -1053,6 +1054,57 @@ describe("control operations", () => {
         input: { reason: "first" },
       },
     ]);
+  });
+
+  it("does not treat an incomplete start claim as durable authority after revocation", async () => {
+    const repository = makeRepository();
+    repository.projects.set(`${ORG}:manual:project`, { id: "project-1", disabled: false });
+    const claimed = await repository.insertControlOperation({
+      organizationId: ORG,
+      op: "execution_start",
+      status: "recorded",
+      idempotencyKey: "start-revoked-before-recovery",
+      executionId: null,
+      capability: "control.execution_start",
+      subject: "machine:test",
+      effect: {
+        requestTarget: {
+          trigger: "manual",
+          projectSlug: "project",
+          expectedVersionId: null,
+        },
+        dispatchRequest: {
+          projectId: "project-1",
+          projectSlug: "project",
+          trigger: "manual",
+          expectedVersionId: null,
+          actor: "approved-actor",
+          deliveryKey: "control-start-revoked-before-recovery",
+          inputPresent: false,
+          input: null,
+          credentialKind: "apiKey",
+          credentialId: authorization.credentialId,
+        },
+      },
+    });
+    assert.equal(claimed.inserted, true);
+
+    const operations = createPublicOperations(repository, {
+      ...baseCapabilities(),
+      roomAuthority: makeAuthority(new Set()),
+    });
+    const recovered = await operations.startApprovedExecution(authorization, {
+      idempotencyKey: "start-revoked-before-recovery",
+      trigger: "manual",
+      projectSlug: "project",
+    });
+
+    assert.deepEqual(recovered, {
+      status: "control_capability_denied",
+      capability: "control.execution_start",
+    });
+    assert.equal(repository.dispatchInputs.length, 0);
+    assert.equal(repository.opsById.get(claimed.record.id)?.status, "recorded");
   });
 
   it("claims the start idempotency key before dispatch so a different op cannot create an effect", async () => {
