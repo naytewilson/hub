@@ -83,19 +83,11 @@ export async function checkControlCapability(
 }
 
 function acknowledgementKind(effect: unknown): string | undefined {
-  if (
-    typeof effect !== "object" ||
-    effect === null ||
-    !("acknowledgement" in effect)
-  ) {
+  if (typeof effect !== "object" || effect === null || !("acknowledgement" in effect)) {
     return undefined;
   }
   const acknowledgement = effect.acknowledgement;
-  if (
-    typeof acknowledgement !== "object" ||
-    acknowledgement === null ||
-    !("kind" in acknowledgement)
-  ) {
+  if (typeof acknowledgement !== "object" || acknowledgement === null || !("kind" in acknowledgement)) {
     return undefined;
   }
   const kind = acknowledgement.kind;
