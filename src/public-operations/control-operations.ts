@@ -124,31 +124,78 @@ export function replayOrConflict(
   return { status: "idempotency_key_conflict", existingOperationId: existing.id };
 }
 
-function startRequestTarget(effect: unknown):
-  | {
-      trigger: string;
-      projectSlug: string;
-      expectedVersionId: string | null;
-    }
-  | undefined {
-  if (typeof effect !== "object" || effect === null || !("requestTarget" in effect)) {
-    return undefined;
-  }
-  const target = effect.requestTarget;
-  if (typeof target !== "object" || target === null) return undefined;
-  if (!("trigger" in target) || !("projectSlug" in target) || !("expectedVersionId" in target)) {
-    return undefined;
-  }
-  const trigger = target.trigger;
-  const projectSlug = target.projectSlug;
-  const expectedVersionId = target.expectedVersionId;
-  if (typeof trigger !== "string" || typeof projectSlug !== "string") {
-    return undefined;
-  }
-  if (expectedVersionId !== null && typeof expectedVersionId !== "string") {
-    return undefined;
-  }
+export interface StartRequestTarget {
+  trigger: string;
+  projectSlug: string;
+  expectedVersionId: string | null;
+}
+
+export interface StartDispatchClaim extends StartRequestTarget {
+  projectId: string;
+  actor: string;
+  deliveryKey: string;
+  inputPresent: boolean;
+  input: unknown;
+  credentialKind: "apiKey" | "cliCredential";
+  credentialId: string;
+}
+
+function unknownRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+export function startRequestTarget(effect: unknown): StartRequestTarget | undefined {
+  const effectRecord = unknownRecord(effect);
+  const target = unknownRecord(effectRecord?.["requestTarget"]);
+  if (target === undefined) return undefined;
+  const trigger = target["trigger"];
+  const projectSlug = target["projectSlug"];
+  const expectedVersionId = target["expectedVersionId"];
+  if (typeof trigger !== "string" || typeof projectSlug !== "string") return undefined;
+  if (expectedVersionId !== null && typeof expectedVersionId !== "string") return undefined;
   return { trigger, projectSlug, expectedVersionId };
+}
+
+export function startDispatchClaim(effect: unknown): StartDispatchClaim | undefined {
+  const effectRecord = unknownRecord(effect);
+  const claim = unknownRecord(effectRecord?.["dispatchRequest"]);
+  if (claim === undefined) return undefined;
+  const projectId = claim["projectId"];
+  const projectSlug = claim["projectSlug"];
+  const trigger = claim["trigger"];
+  const expectedVersionId = claim["expectedVersionId"];
+  const actor = claim["actor"];
+  const deliveryKey = claim["deliveryKey"];
+  const inputPresent = claim["inputPresent"];
+  const credentialKind = claim["credentialKind"];
+  const credentialId = claim["credentialId"];
+  if (
+    typeof projectId !== "string" ||
+    typeof projectSlug !== "string" ||
+    typeof trigger !== "string" ||
+    typeof actor !== "string" ||
+    typeof deliveryKey !== "string" ||
+    typeof inputPresent !== "boolean" ||
+    typeof credentialId !== "string" ||
+    (credentialKind !== "apiKey" && credentialKind !== "cliCredential")
+  ) {
+    return undefined;
+  }
+  if (expectedVersionId !== null && typeof expectedVersionId !== "string") return undefined;
+  return {
+    projectId,
+    projectSlug,
+    trigger,
+    expectedVersionId,
+    actor,
+    deliveryKey,
+    inputPresent,
+    input: claim["input"],
+    credentialKind,
+    credentialId,
+  };
 }
 
 export function replayStartOrConflict(
