@@ -971,9 +971,10 @@ describe("control operations", () => {
     assert.equal(repository.opsById.size, 1);
     assert.equal(repository.dispatchInputs.length, 2);
 
-    const deliveries = repository.dispatchInputs.map((input) =>
-      z.object({ payload: z.object({ publicDeliveryKey: z.string() }) }).parse(input).payload
-        .publicDeliveryKey,
+    const deliveries = repository.dispatchInputs.map(
+      (input) =>
+        z.object({ payload: z.object({ publicDeliveryKey: z.string() }) }).parse(input).payload
+          .publicDeliveryKey,
     );
     assert.deepEqual(deliveries, ["control-start-crash-window", "control-start-crash-window"]);
   });
