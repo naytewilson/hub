@@ -795,6 +795,19 @@ describe("control operations", () => {
     assert.equal(effect.providerEventReceiptId, "receipt-1");
     assert.equal(effect.triggerRunId, "run-1");
     assert.equal(effect.configuredTriggerName, "manual");
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(result.operation.effect, "requestTarget"),
+      false,
+    );
+    const stored = repository.opsById.get(result.operation.operationId);
+    assert.deepEqual(
+      (stored?.effect as { requestTarget?: unknown } | undefined)?.requestTarget,
+      {
+        trigger: "manual",
+        projectSlug: "project",
+        expectedVersionId: null,
+      },
+    );
     const dispatch = z
       .object({ payload: z.object({ publicDeliveryKey: z.string() }) })
       .parse(repository.dispatchInputs[0]);
