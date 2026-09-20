@@ -147,6 +147,57 @@ describe("agent execution PostgreSQL repository", () => {
     }
   });
 
+  it("keeps the control ledger winner consistent with effects when start races cancel", async () => {
+    const fixture = await executionFixture(postgres);
+    const idempotencyKey = "start-cancel-race";
+    try {
+      const [startClaim, cancel] = await Promise.all([
+        fixture.database.insertControlOperation({
+          organizationId: "org-1",
+          op: "execution_start",
+          status: "recorded",
+          idempotencyKey,
+          executionId: null,
+          capability: "control.execution_start",
+          subject: "machine:test",
+          effect: {
+            requestTarget: {
+              trigger: "manual",
+              projectSlug: "project",
+              expectedVersionId: null,
+            },
+          },
+        }),
+        fixture.database.applyCancelControlOperation({
+          organizationId: "org-1",
+          executionId: fixture.execution.id,
+          idempotencyKey,
+          capability: "control.cancel",
+          subject: "machine:test",
+        }),
+      ]);
+
+      const operations = await fixture.database.listControlOperations("org-1", { limit: 10 });
+      assert.equal(operations.length, 1);
+      const winner = operations[0];
+      assert.ok(winner);
+      const execution = await fixture.database.findAgentExecutionById(fixture.execution.id);
+      assert.ok(execution);
+
+      if (startClaim.inserted) {
+        assert.equal(winner.op, "execution_start");
+        assert.equal(cancel.status, "existing");
+        assert.equal(execution.hubAction, null);
+      } else {
+        assert.equal(winner.op, "cancel");
+        assert.equal(cancel.status, "applied");
+        assert.equal(execution.hubAction, "interrupt");
+      }
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
   it("finalizes one durable approved-start claim in place", async () => {
     const fixture = await executionFixture(postgres);
     try {
