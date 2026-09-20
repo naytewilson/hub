@@ -123,20 +123,12 @@ function startRequestTarget(effect: unknown): {
   projectSlug: string;
   expectedVersionId: string | null;
 } | undefined {
-  if (
-    typeof effect !== "object" ||
-    effect === null ||
-    !("requestTarget" in effect)
-  ) {
+  if (typeof effect !== "object" || effect === null || !("requestTarget" in effect)) {
     return undefined;
   }
   const target = effect.requestTarget;
   if (typeof target !== "object" || target === null) return undefined;
-  if (
-    !("trigger" in target) ||
-    !("projectSlug" in target) ||
-    !("expectedVersionId" in target)
-  ) {
+  if (!("trigger" in target) || !("projectSlug" in target) || !("expectedVersionId" in target)) {
     return undefined;
   }
   const trigger = target.trigger;
