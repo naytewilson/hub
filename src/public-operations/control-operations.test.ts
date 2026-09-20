@@ -895,9 +895,7 @@ describe("control operations", () => {
     const stored = repository.opsById.get(result.operation.operationId);
     assert.ok(stored);
     assert.ok(
-      typeof stored.effect === "object" &&
-        stored.effect !== null &&
-        !Array.isArray(stored.effect),
+      typeof stored.effect === "object" && stored.effect !== null && !Array.isArray(stored.effect),
     );
     assert.ok("requestTarget" in stored.effect);
     assert.deepEqual(stored.effect["requestTarget"], {
