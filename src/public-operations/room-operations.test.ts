@@ -382,6 +382,8 @@ function unusedRepository(): PublicOperationRepository {
     findAgentExecution: unused,
     requestExecutionHubAction: unused,
     recordExecutionHubAcknowledgement: unused,
+    applyCancelControlOperation: unused,
+    applyAcknowledgementControlOperation: unused,
     insertControlOperation: unused,
     findControlOperationById: unused,
     findControlOperationByKey: unused,
