@@ -213,10 +213,7 @@ describe("agent execution PostgreSQL repository", () => {
       assert.equal(finalized.status, "applied");
       assert.deepEqual(finalized.effect, effect);
 
-      const persisted = await fixture.database.findControlOperationById(
-        "org-1",
-        claimed.record.id,
-      );
+      const persisted = await fixture.database.findControlOperationById("org-1", claimed.record.id);
       assert.equal(persisted?.status, "applied");
       assert.deepEqual(persisted?.effect, effect);
     } finally {
