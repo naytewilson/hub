@@ -983,7 +983,9 @@ describe("control operations", () => {
       }
       return durableFinalize(input);
     };
-    const dispatchManualEvent = (input: Parameters<PublicOperationCapabilities["dispatchManualEvent"]>[0]) => {
+    const dispatchManualEvent = (
+      input: Parameters<PublicOperationCapabilities["dispatchManualEvent"]>[0],
+    ) => {
       repository.dispatchInputs.push(input);
       return Promise.resolve({ providerEventReceiptId: "receipt-1" });
     };
@@ -1027,16 +1029,17 @@ describe("control operations", () => {
     assert.equal(repository.opsById.size, 1);
     assert.equal(repository.dispatchInputs.length, 2);
 
-    const dispatches = repository.dispatchInputs.map((raw) =>
-      z
-        .object({
-          payload: z.object({
-            publicDeliveryKey: z.string(),
-            actor: z.string(),
-            input: z.unknown(),
-          }),
-        })
-        .parse(raw).payload,
+    const dispatches = repository.dispatchInputs.map(
+      (raw) =>
+        z
+          .object({
+            payload: z.object({
+              publicDeliveryKey: z.string(),
+              actor: z.string(),
+              input: z.unknown(),
+            }),
+          })
+          .parse(raw).payload,
     );
     assert.deepEqual(dispatches, [
       {
