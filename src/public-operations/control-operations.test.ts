@@ -931,7 +931,7 @@ describe("control operations", () => {
   it("recovers approved-start after dispatch committed but control receipt persistence failed", async () => {
     const repository = makeRepository();
     repository.projects.set(`${ORG}:manual:project`, { id: "project-1", disabled: false });
-    const durableInsert = repository.insertControlOperation;
+    const durableInsert = repository.insertControlOperation.bind(repository);
     let failReceiptOnce = true;
     repository.insertControlOperation = async (input) => {
       if (failReceiptOnce) {
