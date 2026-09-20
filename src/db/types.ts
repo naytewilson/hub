@@ -226,6 +226,12 @@ export type ApplyAcknowledgementControlOperationResult =
   | { status: "existing"; record: ControlOperationRecord }
   | { status: "execution_not_found" };
 
+export interface CompleteStartControlOperationInput {
+  organizationId: string;
+  operationId: string;
+  effect: unknown;
+}
+
 export interface ListControlOperationsFilter {
   executionId?: string;
   op?: ControlOp;
@@ -1458,6 +1464,13 @@ export interface Database {
   applyAcknowledgementControlOperation(
     input: ApplyAcknowledgementControlOperationInput,
   ): Promise<ApplyAcknowledgementControlOperationResult>;
+  /**
+   * Finalizes a previously authorized execution_start claim. The claim row
+   * must already own the organization/idempotency key before dispatch begins.
+   */
+  completeStartControlOperation(
+    input: CompleteStartControlOperationInput,
+  ): Promise<ControlOperationRecord | undefined>;
   insertControlOperation(
     input: InsertControlOperationInput,
   ): Promise<{ inserted: boolean; record: ControlOperationRecord }>;
