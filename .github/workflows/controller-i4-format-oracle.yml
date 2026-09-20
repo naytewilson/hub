@@ -1,0 +1,36 @@
+name: Controller I4 Format Oracle
+
+on:
+  push:
+    branches:
+      - north/i4-control-contract-corrective-20260919
+
+permissions:
+  contents: read
+
+jobs:
+  format-oracle:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Apply repository formatter to I4-owned files
+        run: |
+          npx oxfmt \
+            src/db/agent-executions.integration.test.ts \
+            src/db/memory.ts \
+            src/db/pg.ts \
+            src/db/types.ts \
+            src/public-api/room-projection-freshness.test.ts \
+            src/public-operations/control-operations.test.ts \
+            src/public-operations/control-operations.ts \
+            src/public-operations/database-adapter.ts \
+            src/public-operations/index.ts \
+            src/public-operations/room-operations.test.ts \
+            src/public-operations/types.ts
+      - name: Emit exact formatter diff
+        run: git diff --no-color -- src/db src/public-api src/public-operations
