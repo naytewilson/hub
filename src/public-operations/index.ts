@@ -332,35 +332,29 @@ export function createPublicOperations(
           authorization,
           "cancel",
           input,
-          async (target) => {
+          async (target, controlAuthorization) => {
             if (target === undefined) return { status: "execution_not_found" };
-            const updated = await repository.requestExecutionHubAction(
-              authorization.organizationId,
-              input.executionId,
-              "interrupt",
-            );
-            if (updated === undefined) {
-              // Lost-update race: a concurrent request with the same idempotency
-              // key may have won the hub_action signal. Re-check the key before
-              // reporting a precondition failure so the loser replays the
-              // winner's op instead of 409ing on its own signal.
-              const raced = await repository.findControlOperationByKey(
-                authorization.organizationId,
-                input.idempotencyKey,
-              );
-              if (raced !== undefined) {
-                return { status: "replay_stored", existing: raced };
-              }
+            const committed = await repository.applyCancelControlOperation({
+              organizationId: authorization.organizationId,
+              executionId: input.executionId,
+              idempotencyKey: input.idempotencyKey,
+              capability: controlAuthorization.capability,
+              subject: controlAuthorization.subject,
+              correlationId: input.correlationId ?? null,
+            });
+            if (committed.status === "existing") {
+              return { status: "replay_stored", existing: committed.record };
+            }
+            if (committed.status === "execution_not_found") {
+              return { status: "execution_not_found" };
+            }
+            if (committed.status === "precondition_failed") {
               return {
                 status: "control_precondition_failed",
                 reason: "execution_not_live_or_action_pending",
               };
             }
-            return {
-              status: "ok",
-              durability: "applied",
-              effect: { previousHubAction: null, executionStatus: updated.status },
-            };
+            return { status: "committed", record: committed.record };
           },
         );
       } catch (error) {
@@ -401,7 +395,7 @@ export function createPublicOperations(
           authorization,
           "acknowledge",
           input,
-          async (target) => {
+          async (target, controlAuthorization) => {
             if (target === undefined) return { status: "execution_not_found" };
             if (input.attentionKind === "finish_execution_call") {
               return {
@@ -409,22 +403,22 @@ export function createPublicOperations(
                 reason: "finish_execution_call_is_daemon_side",
               };
             }
-            const updated = await repository.recordExecutionHubAcknowledgement(
-              authorization.organizationId,
-              input.executionId,
-              toHubAcknowledgement(input.attentionKind, observedAt),
-            );
-            if (updated === undefined) return { status: "execution_not_found" };
-            return {
-              status: "ok",
-              durability: "applied",
-              effect: {
-                acknowledgement: {
-                  kind: input.attentionKind,
-                  observedAt: observedAt.toISOString(),
-                },
-              },
-            };
+            const committed = await repository.applyAcknowledgementControlOperation({
+              organizationId: authorization.organizationId,
+              executionId: input.executionId,
+              idempotencyKey: input.idempotencyKey,
+              capability: controlAuthorization.capability,
+              subject: controlAuthorization.subject,
+              correlationId: input.correlationId ?? null,
+              acknowledgement: toHubAcknowledgement(input.attentionKind, observedAt),
+            });
+            if (committed.status === "existing") {
+              return { status: "replay_stored", existing: committed.record };
+            }
+            if (committed.status === "execution_not_found") {
+              return { status: "execution_not_found" };
+            }
+            return { status: "committed", record: committed.record };
           },
         );
       } catch (error) {
