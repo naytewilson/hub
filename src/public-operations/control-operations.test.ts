@@ -631,7 +631,7 @@ describe("control operations", () => {
         executionId: EXECUTION_ID,
         idempotencyKey: "retry-live",
       }),
-      { status: "control_precondition_failed", reason: "execution_still_live" },
+      { status: "control_precondition_failed", reason: "execution_not_failed" },
     );
     repository.executions.set(EXECUTION_ID, baseExecution({ status: "failed" }));
     const retry = await operations.retryExecution(authorization, {
