@@ -2609,7 +2609,7 @@ class PgDatabase implements Database {
     input: CompleteStartControlOperationInput,
   ): Promise<ControlOperationRecord | undefined> {
     try {
-      const rows = await query<ControlOperationRow>(
+      const updated = await query<ControlOperationRow>(
         this.pool,
         `update control_operations
          set status = 'applied',
@@ -2618,11 +2618,23 @@ class PgDatabase implements Database {
          where id = $1
            and organization_id = $2
            and op = 'execution_start'
-           and status in ('recorded', 'applied')
+           and status = 'recorded'
          returning *`,
         [input.operationId, input.organizationId, JSON.stringify(input.effect)],
       );
-      const row = rows.rows[0];
+      const transitioned = updated.rows[0];
+      if (transitioned !== undefined) return toControlOperationRecord(transitioned);
+
+      const existing = await query<ControlOperationRow>(
+        this.pool,
+        `select * from control_operations
+         where id = $1
+           and organization_id = $2
+           and op = 'execution_start'
+           and status = 'applied'`,
+        [input.operationId, input.organizationId],
+      );
+      const row = existing.rows[0];
       return row === undefined ? undefined : toControlOperationRecord(row);
     } catch (error) {
       throw toDatabaseError(error);
