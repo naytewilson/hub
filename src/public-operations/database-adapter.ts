@@ -103,6 +103,12 @@ export function createDatabasePublicOperationRepository(
       if (execution?.organizationId !== organizationId) return undefined;
       return database.recordAgentExecutionHubAcknowledgement(executionId, acknowledgement);
     },
+    async applyCancelControlOperation(input) {
+      return database.applyCancelControlOperation(input);
+    },
+    async applyAcknowledgementControlOperation(input) {
+      return database.applyAcknowledgementControlOperation(input);
+    },
     async insertControlOperation(input) {
       return database.insertControlOperation(input);
     },
