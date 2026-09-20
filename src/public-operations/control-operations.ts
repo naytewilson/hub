@@ -34,8 +34,14 @@ export interface ControlInvocationInput {
   attentionKind?: "terminal" | "idle" | "finish_execution_call" | undefined;
 }
 
+export interface ControlAuthorizationContext {
+  capability: string;
+  subject: string;
+}
+
 export type ControlOutcome =
   | { status: "ok"; durability: "applied" | "recorded"; effect: unknown }
+  | { status: "committed"; record: ControlOperationRecord }
   | { status: "execution_not_found" }
   | { status: "control_precondition_failed"; reason: string }
   | { status: "replay_stored"; existing: ControlOperationRecord };
@@ -183,7 +189,10 @@ export async function invokeControlOperation(
   authorization: PublicAuthorization,
   op: ControlOp,
   input: ControlInvocationInput,
-  execute: (target: AgentExecutionRecord | undefined) => Promise<ControlOutcome>,
+  execute: (
+    target: AgentExecutionRecord | undefined,
+    authorizationContext: ControlAuthorizationContext,
+  ) => Promise<ControlOutcome>,
 ): Promise<ControlExecutionResult> {
   const { repository, capabilities } = executor;
   const organizationId = authorization.organizationId;
@@ -212,10 +221,17 @@ export async function invokeControlOperation(
     input.executionId === undefined
       ? undefined
       : await repository.findAgentExecution(organizationId, input.executionId);
+  const authorizationContext: ControlAuthorizationContext = {
+    capability: controlCapabilityFor(op),
+    subject: authority.reader.subjectLabel(),
+  };
 
-  const outcome = await execute(target);
+  const outcome = await execute(target, authorizationContext);
   if (outcome.status === "replay_stored") {
     return replayOrConflict(outcome.existing, op, input);
+  }
+  if (outcome.status === "committed") {
+    return { status: outcome.record.status, operation: toControlOperationWire(outcome.record) };
   }
   if (outcome.status !== "ok") return outcome;
 
@@ -225,8 +241,8 @@ export async function invokeControlOperation(
     status: outcome.durability,
     idempotencyKey: input.idempotencyKey,
     executionId: input.executionId ?? null,
-    capability: controlCapabilityFor(op),
-    subject: authority.reader.subjectLabel(),
+    capability: authorizationContext.capability,
+    subject: authorizationContext.subject,
     correlationId: input.correlationId ?? null,
     effect: outcome.effect,
   });
@@ -240,7 +256,7 @@ export async function invokeControlOperation(
 export function toHubAcknowledgement(
   kind: "terminal" | "idle",
   observedAt: Date,
-): AgentExecutionHubAcknowledgementInput {
+): Extract<AgentExecutionHubAcknowledgementInput, { kind: "terminal" | "idle" }> {
   return kind === "terminal" ? { kind: "terminal", observedAt } : { kind: "idle", observedAt };
 }
 
