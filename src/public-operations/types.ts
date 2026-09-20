@@ -551,17 +551,14 @@ export interface ControlOperationWire {
   updatedAt: string;
 }
 
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function controlOperationEffectForWire(record: ControlOperationRecord): unknown {
   const effect = record.effect;
-  if (
-    record.op !== "execution_start" ||
-    typeof effect !== "object" ||
-    effect === null ||
-    Array.isArray(effect)
-  ) {
-    return effect;
-  }
-  const publicEffect = { ...(effect as Record<string, unknown>) };
+  if (record.op !== "execution_start" || !isUnknownRecord(effect)) return effect;
+  const publicEffect = { ...effect };
   delete publicEffect["requestTarget"];
   return publicEffect;
 }
