@@ -218,10 +218,7 @@ export interface ApplyAcknowledgementControlOperationInput {
   capability: string;
   subject: string;
   correlationId?: string | null;
-  acknowledgement: Extract<
-    AgentExecutionHubAcknowledgementInput,
-    { kind: "terminal" | "idle" }
-  >;
+  acknowledgement: Extract<AgentExecutionHubAcknowledgementInput, { kind: "terminal" | "idle" }>;
 }
 
 export type ApplyAcknowledgementControlOperationResult =
