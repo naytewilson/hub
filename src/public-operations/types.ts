@@ -7,6 +7,7 @@ import type {
   ApplyAcknowledgementControlOperationResult,
   ApplyCancelControlOperationInput,
   ApplyCancelControlOperationResult,
+  CompleteStartControlOperationInput,
   ControlOperationRecord,
   ControlOperationStatus,
   InsertControlOperationInput,
@@ -459,6 +460,9 @@ export interface PublicOperationRepository {
   applyAcknowledgementControlOperation(
     input: ApplyAcknowledgementControlOperationInput,
   ): Promise<ApplyAcknowledgementControlOperationResult>;
+  completeStartControlOperation(
+    input: CompleteStartControlOperationInput,
+  ): Promise<ControlOperationRecord | undefined>;
   insertControlOperation(
     input: InsertControlOperationInput,
   ): Promise<{ inserted: boolean; record: ControlOperationRecord }>;
@@ -560,6 +564,7 @@ function controlOperationEffectForWire(record: ControlOperationRecord): unknown 
   if (record.op !== "execution_start" || !isUnknownRecord(effect)) return effect;
   const publicEffect = { ...effect };
   delete publicEffect["requestTarget"];
+  delete publicEffect["dispatchRequest"];
   return publicEffect;
 }
 
