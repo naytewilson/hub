@@ -446,12 +446,7 @@ export function createPublicOperations(
           const resolution = replayStartOrConflict(existing, input);
           if (resolution.status === "idempotency_key_conflict") return resolution;
           if (existing.status === "applied") return resolution;
-          return recoverRecordedStartClaim(
-            repository,
-            capabilities,
-            organizationId,
-            existing,
-          );
+          return recoverRecordedStartClaim(repository, capabilities, organizationId, existing);
         }
 
         const authority = resolveControlAuthority(capabilities);
@@ -768,14 +763,7 @@ async function recoverRecordedStartClaim(
   if (claim === undefined) {
     throw new Error("recorded execution_start is missing its durable dispatch claim");
   }
-  return dispatchClaimedStart(
-    repository,
-    capabilities,
-    organizationId,
-    record,
-    claim,
-    true,
-  );
+  return dispatchClaimedStart(repository, capabilities, organizationId, record, claim, true);
 }
 
 async function dispatchClaimedStart(
