@@ -2,7 +2,7 @@
  * I4 Hub Control Contract V1 — shared control-operation executor.
  *
  * Every control op runs the frozen V1 spine: idempotency-key validation →
- * stored-key replay/conflict → ANVIL capability check for NEW effects →
+ * stored-key replay/conflict resolution → ANVIL capability check for NEW effects →
  * target/precondition → durable effect + operation record. Replays return the
  * STORED operation with `replayed: true` and exercise no new authority; a
  * different op/target under an already-used key is a 409.
