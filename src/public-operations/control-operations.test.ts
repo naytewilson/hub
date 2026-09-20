@@ -301,6 +301,25 @@ function makeRepository(): ControlTestRepository {
           : { status: "existing" as const, record: committed.record },
       );
     },
+    completeStartControlOperation: (input) => {
+      const existing = opsById.get(input.operationId);
+      if (
+        existing === undefined ||
+        existing.organizationId !== input.organizationId ||
+        existing.op !== "execution_start"
+      ) {
+        return Promise.resolve(undefined);
+      }
+      const updated: ControlOperationRecord = {
+        ...existing,
+        status: "applied",
+        effect: input.effect,
+        updatedAt: new Date(),
+      };
+      opsById.set(updated.id, updated);
+      opsByKey.set(`${updated.organizationId}:${updated.idempotencyKey}`, updated);
+      return Promise.resolve(updated);
+    },
     insertControlOperation: (input: InsertControlOperationInput) =>
       Promise.resolve(insertControlOperationRecord(input)),
     findControlOperationById: (organizationId, id) => {
@@ -854,7 +873,8 @@ describe("control operations", () => {
       }),
       { status: "control_precondition_failed", reason: "dispatch_conflict" },
     );
-    assert.equal(repository.opsById.size, 0);
+    assert.equal(repository.opsById.size, 1);
+    assert.equal([...repository.opsById.values()][0]?.status, "recorded");
   });
 
   it("startApprovedExecution dispatches with the idempotency-derived delivery key and records the op", async () => {
@@ -892,6 +912,10 @@ describe("control operations", () => {
       Object.prototype.hasOwnProperty.call(result.operation.effect, "requestTarget"),
       false,
     );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(result.operation.effect, "dispatchRequest"),
+      false,
+    );
     const stored = repository.opsById.get(result.operation.operationId);
     assert.ok(stored);
     assert.ok(
@@ -903,6 +927,25 @@ describe("control operations", () => {
       projectSlug: "project",
       expectedVersionId: null,
     });
+    assert.ok("dispatchRequest" in stored.effect);
+    const storedDispatch = z
+      .object({
+        projectId: z.string(),
+        trigger: z.string(),
+        projectSlug: z.string(),
+        expectedVersionId: z.string().nullable(),
+        actor: z.string(),
+        deliveryKey: z.string(),
+        inputPresent: z.boolean(),
+        input: z.unknown(),
+        credentialKind: z.enum(["apiKey", "cliCredential"]),
+        credentialId: z.string(),
+      })
+      .parse(stored.effect["dispatchRequest"]);
+    assert.equal(storedDispatch.projectId, "project-1");
+    assert.equal(storedDispatch.deliveryKey, "control-start-key");
+    assert.equal(storedDispatch.inputPresent, true);
+    assert.deepEqual(storedDispatch.input, { reason: "approved" });
     const dispatch = z
       .object({ payload: z.object({ publicDeliveryKey: z.string() }) })
       .parse(repository.dispatchInputs[0]);
@@ -928,55 +971,131 @@ describe("control operations", () => {
     assert.equal(repository.dispatchInputs.length, 1);
   });
 
-  it("recovers approved-start after dispatch committed but control receipt persistence failed", async () => {
+  it("recovers a durable approved-start claim after dispatch committed but finalization failed", async () => {
     const repository = makeRepository();
     repository.projects.set(`${ORG}:manual:project`, { id: "project-1", disabled: false });
-    const durableInsert = repository.insertControlOperation.bind(repository);
-    let failReceiptOnce = true;
-    repository.insertControlOperation = async (input) => {
-      if (failReceiptOnce) {
-        failReceiptOnce = false;
-        throw new Error("injected control receipt persistence failure");
+    const durableFinalize = repository.completeStartControlOperation.bind(repository);
+    let failFinalizeOnce = true;
+    repository.completeStartControlOperation = async (input) => {
+      if (failFinalizeOnce) {
+        failFinalizeOnce = false;
+        throw new Error("injected start finalization failure");
       }
-      return durableInsert(input);
+      return durableFinalize(input);
     };
-    const operations = createPublicOperations(repository, {
+    const dispatchManualEvent = (input: Parameters<PublicOperationCapabilities["dispatchManualEvent"]>[0]) => {
+      repository.dispatchInputs.push(input);
+      return Promise.resolve({ providerEventReceiptId: "receipt-1" });
+    };
+    const first = createPublicOperations(repository, {
       ...baseCapabilities(),
-      dispatchManualEvent: (input) => {
-        repository.dispatchInputs.push(input);
-        // The manual trigger plane is independently idempotent on deliveryId:
-        // retrying the same control key resolves the same persisted receipt/run.
-        return Promise.resolve({ providerEventReceiptId: "receipt-1" });
-      },
+      dispatchManualEvent,
       roomAuthority: makeAuthority(ALL_CONTROL_CAPABILITIES),
     });
 
     await assert.rejects(
       () =>
-        operations.startApprovedExecution(authorization, {
+        first.startApprovedExecution(authorization, {
           idempotencyKey: "start-crash-window",
           trigger: "manual",
           projectSlug: "project",
+          actor: "approved-actor",
+          input: { reason: "first" },
         }),
-      /injected control receipt persistence failure/u,
+      /injected start finalization failure/u,
     );
-    assert.equal(repository.opsById.size, 0);
+    assert.equal(repository.opsById.size, 1);
+    const pending = [...repository.opsById.values()][0];
+    assert.equal(pending?.status, "recorded");
 
-    const recovered = await operations.startApprovedExecution(authorization, {
+    // A fresh operations surface with NO current ANVIL authority can resume
+    // the already-authorized durable claim, but must use the STORED request.
+    const recoveredSurface = createPublicOperations(repository, {
+      ...baseCapabilities(),
+      dispatchManualEvent,
+    });
+    const recovered = await recoveredSurface.startApprovedExecution(authorization, {
       idempotencyKey: "start-crash-window",
       trigger: "manual",
       projectSlug: "project",
+      actor: "changed-actor",
+      input: { reason: "second" },
     });
-    assert.equal(recovered.status, "applied");
+    assert.equal(recovered.status, "replayed");
+    if (recovered.status !== "replayed") throw new Error("unreachable");
+    assert.equal(recovered.operation.status, "applied");
     assert.equal(repository.opsById.size, 1);
     assert.equal(repository.dispatchInputs.length, 2);
 
-    const deliveries = repository.dispatchInputs.map(
-      (input) =>
-        z.object({ payload: z.object({ publicDeliveryKey: z.string() }) }).parse(input).payload
-          .publicDeliveryKey,
+    const dispatches = repository.dispatchInputs.map((raw) =>
+      z
+        .object({
+          payload: z.object({
+            publicDeliveryKey: z.string(),
+            actor: z.string(),
+            input: z.unknown(),
+          }),
+        })
+        .parse(raw).payload,
     );
-    assert.deepEqual(deliveries, ["control-start-crash-window", "control-start-crash-window"]);
+    assert.deepEqual(dispatches, [
+      {
+        publicDeliveryKey: "control-start-crash-window",
+        actor: "approved-actor",
+        input: { reason: "first" },
+      },
+      {
+        publicDeliveryKey: "control-start-crash-window",
+        actor: "approved-actor",
+        input: { reason: "first" },
+      },
+    ]);
+  });
+
+  it("claims the start idempotency key before dispatch so a different op cannot create an effect", async () => {
+    const repository = makeRepository();
+    repository.projects.set(`${ORG}:manual:project`, { id: "project-1", disabled: false });
+    repository.executions.set(EXECUTION_ID, baseExecution());
+
+    let releaseDispatch: (() => void) | undefined;
+    let dispatchEntered: (() => void) | undefined;
+    const entered = new Promise<void>((resolve) => {
+      dispatchEntered = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const operations = createPublicOperations(repository, {
+      ...baseCapabilities(),
+      roomAuthority: makeAuthority(ALL_CONTROL_CAPABILITIES),
+      dispatchManualEvent: async (input) => {
+        repository.dispatchInputs.push(input);
+        dispatchEntered?.();
+        await release;
+        return { providerEventReceiptId: "receipt-1" };
+      },
+    });
+
+    const starting = operations.startApprovedExecution(authorization, {
+      idempotencyKey: "cross-op-race",
+      trigger: "manual",
+      projectSlug: "project",
+    });
+    await entered;
+
+    const cancel = await operations.cancelExecution(authorization, {
+      executionId: EXECUTION_ID,
+      idempotencyKey: "cross-op-race",
+    });
+    assert.equal(cancel.status, "idempotency_key_conflict");
+    assert.equal(repository.hubActionRequests.length, 0);
+    assert.equal(repository.executions.get(EXECUTION_ID)?.hubAction, null);
+
+    releaseDispatch?.();
+    const started = await starting;
+    assert.equal(started.status, "applied");
+    assert.equal(repository.opsById.size, 1);
+    assert.equal([...repository.opsById.values()][0]?.op, "execution_start");
   });
 
   it("rejects invalid inputs before any effect", async () => {
