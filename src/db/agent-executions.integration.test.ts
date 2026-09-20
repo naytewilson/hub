@@ -68,6 +68,88 @@ describe("agent execution PostgreSQL repository", () => {
     }
   });
 
+  it("atomically couples cancel effect and idempotency receipt under same-key concurrency", async () => {
+    const fixture = await executionFixture(postgres);
+    try {
+      const input = {
+        organizationId: "org-1",
+        executionId: fixture.execution.id,
+        idempotencyKey: "atomic-cancel",
+        capability: "control.cancel",
+        subject: "machine:test",
+        correlationId: "correlation-cancel",
+      };
+      const results = await Promise.all([
+        fixture.database.applyCancelControlOperation(input),
+        fixture.database.applyCancelControlOperation(input),
+      ]);
+      assert.deepEqual(
+        results.map(({ status }) => status).sort(),
+        ["applied", "existing"],
+      );
+      const applied = results.find((result) => result.status === "applied");
+      const existing = results.find((result) => result.status === "existing");
+      assert.ok(applied);
+      assert.ok(existing);
+      assert.equal(existing.record.id, applied.record.id);
+
+      const persisted = await fixture.database.findAgentExecutionById(fixture.execution.id);
+      assert.equal(persisted?.hubAction, "interrupt");
+      const operations = await fixture.database.listControlOperations("org-1", {
+        executionId: fixture.execution.id,
+        op: "cancel",
+        status: "applied",
+        limit: 10,
+      });
+      assert.equal(operations.length, 1);
+      assert.equal(operations[0]?.id, applied.record.id);
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("atomically couples acknowledgement effect and idempotency receipt under same-key concurrency", async () => {
+    const fixture = await executionFixture(postgres);
+    const observedAt = new Date("2026-09-20T00:00:00.000Z");
+    try {
+      const input = {
+        organizationId: "org-1",
+        executionId: fixture.execution.id,
+        idempotencyKey: "atomic-ack",
+        capability: "control.acknowledge",
+        subject: "machine:test",
+        correlationId: "correlation-ack",
+        acknowledgement: { kind: "terminal" as const, observedAt },
+      };
+      const results = await Promise.all([
+        fixture.database.applyAcknowledgementControlOperation(input),
+        fixture.database.applyAcknowledgementControlOperation(input),
+      ]);
+      assert.deepEqual(
+        results.map(({ status }) => status).sort(),
+        ["applied", "existing"],
+      );
+      const applied = results.find((result) => result.status === "applied");
+      const existing = results.find((result) => result.status === "existing");
+      assert.ok(applied);
+      assert.ok(existing);
+      assert.equal(existing.record.id, applied.record.id);
+
+      const persisted = await fixture.database.findAgentExecutionById(fixture.execution.id);
+      assert.equal(persisted?.hubActionAcknowledgements.terminalAt?.toISOString(), observedAt.toISOString());
+      const operations = await fixture.database.listControlOperations("org-1", {
+        executionId: fixture.execution.id,
+        op: "acknowledge",
+        status: "applied",
+        limit: 10,
+      });
+      assert.equal(operations.length, 1);
+      assert.equal(operations[0]?.id, applied.record.id);
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
   it("persists one run, one step, explicit execution ownership, and idempotent finish", async () => {
     const fixture = await executionFixture(postgres);
     try {
