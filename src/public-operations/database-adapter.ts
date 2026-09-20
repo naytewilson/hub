@@ -109,6 +109,9 @@ export function createDatabasePublicOperationRepository(
     async applyAcknowledgementControlOperation(input) {
       return database.applyAcknowledgementControlOperation(input);
     },
+    async completeStartControlOperation(input) {
+      return database.completeStartControlOperation(input);
+    },
     async insertControlOperation(input) {
       return database.insertControlOperation(input);
     },
