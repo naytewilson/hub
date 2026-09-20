@@ -35,6 +35,7 @@ import type {
   ApplyAcknowledgementControlOperationResult,
   ApplyCancelControlOperationInput,
   ApplyCancelControlOperationResult,
+  CompleteStartControlOperationInput,
   ConfigurationSyncAttemptRecord,
   ControlOperationRecord,
   CreateProjectInput,
@@ -2599,6 +2600,30 @@ class PgDatabase implements Database {
         }
         return { status: "applied", record: committed.record };
       });
+    } catch (error) {
+      throw toDatabaseError(error);
+    }
+  }
+
+  async completeStartControlOperation(
+    input: CompleteStartControlOperationInput,
+  ): Promise<ControlOperationRecord | undefined> {
+    try {
+      const rows = await query<ControlOperationRow>(
+        this.pool,
+        `update control_operations
+         set status = 'applied',
+             effect = $3::jsonb,
+             updated_at = now()
+         where id = $1
+           and organization_id = $2
+           and op = 'execution_start'
+           and status in ('recorded', 'applied')
+         returning *`,
+        [input.operationId, input.organizationId, JSON.stringify(input.effect)],
+      );
+      const row = rows.rows[0];
+      return row === undefined ? undefined : toControlOperationRecord(row);
     } catch (error) {
       throw toDatabaseError(error);
     }
