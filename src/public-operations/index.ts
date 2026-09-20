@@ -6,6 +6,7 @@ import type { DaemonClock } from "../daemons/index.js";
 import { DaemonDispatchFailure } from "../daemons/index.js";
 import { ENROLLMENT_LIFETIME_MS } from "../daemons/registration.js";
 import { isDatabaseUnavailableError } from "../db/errors.js";
+import type { ControlOperationRecord } from "../db/types.js";
 import { formatInvocationRejection } from "../triggers/invocation.js";
 import { ManualRunRejected } from "../triggers/manual/provider.js";
 import type {
@@ -14,6 +15,7 @@ import type {
   PublicOperationCapabilities,
   PublicOperationRepository,
   PublicOperations,
+  StartApprovedExecutionResult,
 } from "./types.js";
 import { toControlOperationWire } from "./types.js";
 import {
@@ -31,6 +33,8 @@ import {
   invokeControlOperation,
   replayStartOrConflict,
   resolveControlAuthority,
+  startDispatchClaim,
+  type StartDispatchClaim,
   toHubAcknowledgement,
   validateStartApprovedExecutionInput,
 } from "./control-operations.js";
@@ -430,15 +434,32 @@ export function createPublicOperations(
         const issues = validateStartApprovedExecutionInput(input);
         if (issues.length > 0) return { status: "invalid_input", issues };
         const organizationId = authorization.organizationId;
-        // Same frozen ordering as the execution-targeted controls: replay
-        // first, authority check only for a genuinely new mutation.
+
+        // Replay/continuation precedes current authority. An already-recorded
+        // start claim was authorized before any dispatch side effect and owns
+        // this org/idempotency key until it is finalized.
         const existing = await repository.findControlOperationByKey(
           organizationId,
           input.idempotencyKey,
         );
         if (existing !== undefined) {
-          return replayStartOrConflict(existing, input);
+          const resolution = replayStartOrConflict(existing, input);
+          if (resolution.status === "idempotency_key_conflict") return resolution;
+          if (existing.status === "applied") return resolution;
+          const claim = startDispatchClaim(existing.effect);
+          if (claim === undefined) {
+            throw new Error("recorded execution_start is missing its durable dispatch claim");
+          }
+          return dispatchClaimedStart(
+            repository,
+            capabilities,
+            organizationId,
+            existing,
+            claim,
+            true,
+          );
         }
+
         const authority = resolveControlAuthority(capabilities);
         if (authority === undefined) return { status: "control_plane_unavailable" };
         const check = await checkControlCapability(authority, "execution_start");
@@ -452,68 +473,69 @@ export function createPublicOperations(
         );
         if (project === undefined) return { status: "project_not_found" };
         if (project.status === "disabled") return { status: "trigger_not_found" };
+
         const actor =
           typeof input.actor === "string" && input.actor.length > 0
             ? input.actor
             : authorization.credentialId;
-        const deliveryKey = `control-${input.idempotencyKey}`;
-        let dispatch: DispatchManualRunResult;
-        try {
-          dispatch = await dispatchManualRun(
-            repository,
-            capabilities,
-            authorization,
-            project.id,
-            {
-              projectSlug: input.projectSlug,
-              expectedVersionId: input.expectedVersionId,
-              trigger: input.trigger,
-              actor,
-              deliveryKey,
-              input: input.input,
-            },
-            internalDeliveryId(organizationId, project.id, deliveryKey),
-          );
-        } catch (error) {
-          if (error instanceof ManualRunRejected) {
-            return { status: "control_precondition_failed", reason: error.code };
-          }
-          if (error instanceof DaemonDispatchFailure && error.reason === "daemon_unreachable") {
-            return { status: "control_precondition_failed", reason: "daemon_offline" };
-          }
-          throw error;
-        }
-        if (dispatch.status === "invalid_input") return dispatch;
-        if (dispatch.status !== "dispatched") {
-          return { status: "control_precondition_failed", reason: dispatch.status };
-        }
-        const effect = {
-          providerEventReceiptId: dispatch.providerEventReceiptId,
-          triggerRunId: dispatch.triggerRunId,
-          configuredTriggerName: dispatch.configuredTriggerName,
-          // Durable replay target: a reused key may only replay the exact
-          // approved start target. Different project/trigger/version is 409.
-          requestTarget: {
-            trigger: input.trigger,
-            projectSlug: input.projectSlug,
-            expectedVersionId: input.expectedVersionId ?? null,
-          },
+        const claim: StartDispatchClaim = {
+          projectId: project.id,
+          projectSlug: input.projectSlug,
+          trigger: input.trigger,
+          expectedVersionId: input.expectedVersionId ?? null,
+          actor,
+          deliveryKey: `control-${input.idempotencyKey}`,
+          inputPresent: input.input !== undefined,
+          input: input.input ?? null,
+          credentialKind: authorization.kind,
+          credentialId: authorization.credentialId,
         };
-        const { inserted, record } = await repository.insertControlOperation({
+        const requestTarget = {
+          trigger: claim.trigger,
+          projectSlug: claim.projectSlug,
+          expectedVersionId: claim.expectedVersionId,
+        };
+
+        // Claim the org/idempotency key BEFORE dispatch. This is the durable
+        // authorization/recovery point that prevents a concurrent different
+        // control op from winning the ledger after start has already created work.
+        const claimed = await repository.insertControlOperation({
           organizationId,
           op: "execution_start",
-          status: "applied",
+          status: "recorded",
           idempotencyKey: input.idempotencyKey,
           executionId: null,
           capability: controlCapabilityFor("execution_start"),
           subject: authority.reader.subjectLabel(),
           correlationId: input.correlationId ?? null,
-          effect,
+          effect: { requestTarget, dispatchRequest: claim },
         });
-        if (inserted) {
-          return { status: "applied", operation: toControlOperationWire(record) };
+        if (!claimed.inserted) {
+          const resolution = replayStartOrConflict(claimed.record, input);
+          if (resolution.status === "idempotency_key_conflict") return resolution;
+          if (claimed.record.status === "applied") return resolution;
+          const storedClaim = startDispatchClaim(claimed.record.effect);
+          if (storedClaim === undefined) {
+            throw new Error("recorded execution_start is missing its durable dispatch claim");
+          }
+          return dispatchClaimedStart(
+            repository,
+            capabilities,
+            organizationId,
+            claimed.record,
+            storedClaim,
+            true,
+          );
         }
-        return replayStartOrConflict(record, input);
+
+        return dispatchClaimedStart(
+          repository,
+          capabilities,
+          organizationId,
+          claimed.record,
+          claim,
+          false,
+        );
       } catch (error) {
         return storageUnavailableOrThrow(error);
       }
@@ -728,6 +750,74 @@ function triggerCapability(capabilities: PublicOperationCapabilities, organizati
     throw new Error("organization triggers are unavailable");
   }
   return capabilities.triggerForOrganization(organizationId);
+}
+
+async function dispatchClaimedStart(
+  repository: PublicOperationRepository,
+  capabilities: PublicOperationCapabilities,
+  organizationId: string,
+  record: ControlOperationRecord,
+  claim: StartDispatchClaim,
+  replayed: boolean,
+): Promise<StartApprovedExecutionResult> {
+  const authorization = {
+    organizationId,
+    kind: claim.credentialKind,
+    credentialId: claim.credentialId,
+  };
+  let dispatch: DispatchManualRunResult;
+  try {
+    dispatch = await dispatchManualRun(
+      repository,
+      capabilities,
+      authorization,
+      claim.projectId,
+      {
+        projectSlug: claim.projectSlug,
+        expectedVersionId: claim.expectedVersionId ?? undefined,
+        trigger: claim.trigger,
+        actor: claim.actor,
+        deliveryKey: claim.deliveryKey,
+        input: claim.inputPresent ? claim.input : undefined,
+      },
+      internalDeliveryId(organizationId, claim.projectId, claim.deliveryKey),
+    );
+  } catch (error) {
+    if (error instanceof ManualRunRejected) {
+      return { status: "control_precondition_failed", reason: error.code };
+    }
+    if (error instanceof DaemonDispatchFailure && error.reason === "daemon_unreachable") {
+      return { status: "control_precondition_failed", reason: "daemon_offline" };
+    }
+    throw error;
+  }
+  if (dispatch.status === "invalid_input") return dispatch;
+  if (dispatch.status !== "dispatched") {
+    return { status: "control_precondition_failed", reason: dispatch.status };
+  }
+
+  const finalized = await repository.completeStartControlOperation({
+    organizationId,
+    operationId: record.id,
+    effect: {
+      providerEventReceiptId: dispatch.providerEventReceiptId,
+      triggerRunId: dispatch.triggerRunId,
+      configuredTriggerName: dispatch.configuredTriggerName,
+      requestTarget: {
+        trigger: claim.trigger,
+        projectSlug: claim.projectSlug,
+        expectedVersionId: claim.expectedVersionId,
+      },
+      dispatchRequest: claim,
+    },
+  });
+  if (finalized === undefined) {
+    throw new Error("execution_start durable claim disappeared before finalization");
+  }
+  const operation = toControlOperationWire(finalized);
+  return replayed
+    ? { status: "replayed", operation: { ...operation, replayed: true } }
+    : { status: "applied", operation };
 }
 
 async function dispatchManualRun(
