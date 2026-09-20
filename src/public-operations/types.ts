@@ -541,6 +541,21 @@ export interface ControlOperationWire {
   updatedAt: string;
 }
 
+function controlOperationEffectForWire(record: ControlOperationRecord): unknown {
+  const effect = record.effect;
+  if (
+    record.op !== "execution_start" ||
+    typeof effect !== "object" ||
+    effect === null ||
+    Array.isArray(effect)
+  ) {
+    return effect;
+  }
+  const publicEffect = { ...(effect as Record<string, unknown>) };
+  delete publicEffect.requestTarget;
+  return publicEffect;
+}
+
 export function toControlOperationWire(record: ControlOperationRecord): ControlOperationWire {
   return {
     operationId: record.id,
@@ -551,7 +566,7 @@ export function toControlOperationWire(record: ControlOperationRecord): ControlO
     capability: record.capability,
     subject: record.subject,
     correlationId: record.correlationId,
-    effect: record.effect,
+    effect: controlOperationEffectForWire(record),
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
   };
