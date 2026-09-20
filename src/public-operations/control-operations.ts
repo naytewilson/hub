@@ -87,7 +87,11 @@ function acknowledgementKind(effect: unknown): string | undefined {
     return undefined;
   }
   const acknowledgement = effect.acknowledgement;
-  if (typeof acknowledgement !== "object" || acknowledgement === null || !("kind" in acknowledgement)) {
+  if (
+    typeof acknowledgement !== "object" ||
+    acknowledgement === null ||
+    !("kind" in acknowledgement)
+  ) {
     return undefined;
   }
   const kind = acknowledgement.kind;
