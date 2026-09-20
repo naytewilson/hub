@@ -446,6 +446,19 @@ export function createPublicOperations(
           const resolution = replayStartOrConflict(existing, input);
           if (resolution.status === "idempotency_key_conflict") return resolution;
           if (existing.status === "applied") return resolution;
+
+          // A recorded start claim is an internal crash-recovery marker, not a
+          // durable authorization token. The frozen V1 contract only skips the
+          // ANVIL capability check when replaying an already-applied stored
+          // result. If dispatch/finalization is incomplete, continuing the
+          // effect must still be authorized by the current bound subject.
+          const authority = resolveControlAuthority(capabilities);
+          if (authority === undefined) return { status: "control_plane_unavailable" };
+          const check = await checkControlCapability(authority, "execution_start");
+          if (!check.allowed) {
+            return { status: "control_capability_denied", capability: check.capability };
+          }
+
           const claim = startDispatchClaim(existing.effect);
           if (claim === undefined) {
             throw new Error("recorded execution_start is missing its durable dispatch claim");
