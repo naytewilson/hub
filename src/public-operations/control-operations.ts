@@ -140,10 +140,12 @@ export interface StartDispatchClaim extends StartRequestTarget {
   credentialId: string;
 }
 
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function unknownRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
+  return isUnknownRecord(value) ? value : undefined;
 }
 
 export function startRequestTarget(effect: unknown): StartRequestTarget | undefined {
