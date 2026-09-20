@@ -928,6 +928,56 @@ describe("control operations", () => {
     assert.equal(repository.dispatchInputs.length, 1);
   });
 
+  it("recovers approved-start after dispatch committed but control receipt persistence failed", async () => {
+    const repository = makeRepository();
+    repository.projects.set(`${ORG}:manual:project`, { id: "project-1", disabled: false });
+    const durableInsert = repository.insertControlOperation;
+    let failReceiptOnce = true;
+    repository.insertControlOperation = async (input) => {
+      if (failReceiptOnce) {
+        failReceiptOnce = false;
+        throw new Error("injected control receipt persistence failure");
+      }
+      return durableInsert(input);
+    };
+    const operations = createPublicOperations(repository, {
+      ...baseCapabilities(),
+      dispatchManualEvent: (input) => {
+        repository.dispatchInputs.push(input);
+        // The manual trigger plane is independently idempotent on deliveryId:
+        // retrying the same control key resolves the same persisted receipt/run.
+        return Promise.resolve({ providerEventReceiptId: "receipt-1" });
+      },
+      roomAuthority: makeAuthority(ALL_CONTROL_CAPABILITIES),
+    });
+
+    await assert.rejects(
+      () =>
+        operations.startApprovedExecution(authorization, {
+          idempotencyKey: "start-crash-window",
+          trigger: "manual",
+          projectSlug: "project",
+        }),
+      /injected control receipt persistence failure/u,
+    );
+    assert.equal(repository.opsById.size, 0);
+
+    const recovered = await operations.startApprovedExecution(authorization, {
+      idempotencyKey: "start-crash-window",
+      trigger: "manual",
+      projectSlug: "project",
+    });
+    assert.equal(recovered.status, "applied");
+    assert.equal(repository.opsById.size, 1);
+    assert.equal(repository.dispatchInputs.length, 2);
+
+    const deliveries = repository.dispatchInputs.map((input) =>
+      z.object({ payload: z.object({ publicDeliveryKey: z.string() }) }).parse(input).payload
+        .publicDeliveryKey,
+    );
+    assert.deepEqual(deliveries, ["control-start-crash-window", "control-start-crash-window"]);
+  });
+
   it("rejects invalid inputs before any effect", async () => {
     const repository = makeRepository();
     const operations = createPublicOperations(repository, {
