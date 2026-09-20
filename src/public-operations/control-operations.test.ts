@@ -109,6 +109,31 @@ function makeRepository(): ControlTestRepository {
   const acknowledgementRequests: string[] = [];
   const projects = new Map<string, { id: string; disabled: boolean }>();
   const dispatchInputs: unknown[] = [];
+  const insertControlOperationRecord = (
+    input: InsertControlOperationInput,
+  ): { inserted: boolean; record: ControlOperationRecord } => {
+    const key = `${input.organizationId}:${input.idempotencyKey}`;
+    const existing = opsByKey.get(key);
+    if (existing !== undefined) return { inserted: false, record: existing };
+    const record: ControlOperationRecord = {
+      id: randomUUID(),
+      organizationId: input.organizationId,
+      op: input.op,
+      status: input.status,
+      idempotencyKey: input.idempotencyKey,
+      executionId: input.executionId ?? null,
+      capability: input.capability,
+      subject: input.subject,
+      correlationId: input.correlationId ?? null,
+      effect: input.effect ?? null,
+      response: input.response ?? null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    opsByKey.set(key, record);
+    opsById.set(record.id, record);
+    return { inserted: true, record };
+  };
   const repo: ControlTestRepository = {
     executions,
     opsById,
@@ -185,31 +210,99 @@ function makeRepository(): ControlTestRepository {
       executions.set(executionId, updated);
       return Promise.resolve(updated);
     },
-    insertControlOperation: (input: InsertControlOperationInput) => {
-      const key = `${input.organizationId}:${input.idempotencyKey}`;
-      const existing = opsByKey.get(key);
+    applyCancelControlOperation: (input) => {
+      const existing = opsByKey.get(`${input.organizationId}:${input.idempotencyKey}`);
       if (existing !== undefined) {
-        return Promise.resolve({ inserted: false, record: existing });
+        return Promise.resolve({ status: "existing" as const, record: existing });
       }
-      const record: ControlOperationRecord = {
-        id: randomUUID(),
+      hubActionRequests.push(`${input.organizationId}:${input.executionId}:interrupt`);
+      const execution = executions.get(input.executionId);
+      if (execution === undefined || execution.organizationId !== input.organizationId) {
+        return Promise.resolve({ status: "execution_not_found" as const });
+      }
+      if (
+        (execution.status !== "spawning" && execution.status !== "running") ||
+        execution.hubAction !== null
+      ) {
+        return Promise.resolve({ status: "precondition_failed" as const });
+      }
+      executions.set(input.executionId, {
+        ...execution,
+        hubAction: "interrupt",
+        hubActionReadyAt: null,
+        hubActionCompletedAt: null,
+      });
+      const committed = insertControlOperationRecord({
         organizationId: input.organizationId,
-        op: input.op,
-        status: input.status,
+        op: "cancel",
+        status: "applied",
         idempotencyKey: input.idempotencyKey,
-        executionId: input.executionId ?? null,
+        executionId: input.executionId,
         capability: input.capability,
         subject: input.subject,
         correlationId: input.correlationId ?? null,
-        effect: input.effect ?? null,
-        response: input.response ?? null,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
-      opsByKey.set(key, record);
-      opsById.set(record.id, record);
-      return Promise.resolve({ inserted: true, record });
+        effect: { previousHubAction: null, executionStatus: execution.status },
+      });
+      return Promise.resolve(
+        committed.inserted
+          ? { status: "applied" as const, record: committed.record }
+          : { status: "existing" as const, record: committed.record },
+      );
     },
+    applyAcknowledgementControlOperation: (input) => {
+      const existing = opsByKey.get(`${input.organizationId}:${input.idempotencyKey}`);
+      if (existing !== undefined) {
+        return Promise.resolve({ status: "existing" as const, record: existing });
+      }
+      acknowledgementRequests.push(
+        `${input.organizationId}:${input.executionId}:${input.acknowledgement.kind}`,
+      );
+      const execution = executions.get(input.executionId);
+      if (execution === undefined || execution.organizationId !== input.organizationId) {
+        return Promise.resolve({ status: "execution_not_found" as const });
+      }
+      const acknowledgements = { ...execution.hubActionAcknowledgements };
+      if (input.acknowledgement.kind === "terminal") {
+        if (
+          acknowledgements.terminalAt === null ||
+          input.acknowledgement.observedAt.getTime() > acknowledgements.terminalAt.getTime()
+        ) {
+          acknowledgements.terminalAt = input.acknowledgement.observedAt;
+        }
+      } else if (
+        acknowledgements.idleAt === null ||
+        input.acknowledgement.observedAt.getTime() > acknowledgements.idleAt.getTime()
+      ) {
+        acknowledgements.idleAt = input.acknowledgement.observedAt;
+      }
+      executions.set(input.executionId, {
+        ...execution,
+        hubActionAcknowledgements: acknowledgements,
+      });
+      const committed = insertControlOperationRecord({
+        organizationId: input.organizationId,
+        op: "acknowledge",
+        status: "applied",
+        idempotencyKey: input.idempotencyKey,
+        executionId: input.executionId,
+        capability: input.capability,
+        subject: input.subject,
+        correlationId: input.correlationId ?? null,
+        effect: {
+          acknowledgement: {
+            kind: input.acknowledgement.kind,
+            observedAt: input.acknowledgement.observedAt.toISOString(),
+          },
+        },
+      });
+      return Promise.resolve(
+        committed.inserted
+          ? { status: "applied" as const, record: committed.record }
+          : { status: "existing" as const, record: committed.record },
+      );
+    },
+    insertControlOperation: (input: InsertControlOperationInput) =>
+      Promise.resolve(insertControlOperationRecord(input)),
     findControlOperationById: (organizationId, id) => {
       const record = opsById.get(id);
       if (record === undefined || record.organizationId !== organizationId) {
