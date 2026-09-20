@@ -12,6 +12,7 @@ import type {
   ApplyAcknowledgementControlOperationResult,
   ApplyCancelControlOperationInput,
   ApplyCancelControlOperationResult,
+  CompleteStartControlOperationInput,
   ControlOperationRecord,
   Database,
   InsertAgentExecutionInput,
@@ -2139,6 +2140,28 @@ class MemoryDatabase implements Database {
     this.controlOperations.set(record.id, record);
     this.controlOperationIdsByKey.set(key, record.id);
     return { inserted: true, record };
+  }
+
+  async completeStartControlOperation(
+    input: CompleteStartControlOperationInput,
+  ): Promise<ControlOperationRecord | undefined> {
+    const existing = this.controlOperations.get(input.operationId);
+    if (
+      existing === undefined ||
+      existing.organizationId !== input.organizationId ||
+      existing.op !== "execution_start" ||
+      (existing.status !== "recorded" && existing.status !== "applied")
+    ) {
+      return undefined;
+    }
+    const updated: ControlOperationRecord = {
+      ...existing,
+      status: "applied",
+      effect: input.effect,
+      updatedAt: this.now(),
+    };
+    this.controlOperations.set(existing.id, updated);
+    return updated;
   }
 
   async insertControlOperation(
