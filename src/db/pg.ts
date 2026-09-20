@@ -31,6 +31,10 @@ import type {
   AgentExecutionRecord,
   AttachmentProvider,
   AttachmentRecord,
+  ApplyAcknowledgementControlOperationInput,
+  ApplyAcknowledgementControlOperationResult,
+  ApplyCancelControlOperationInput,
+  ApplyCancelControlOperationResult,
   ConfigurationSyncAttemptRecord,
   ControlOperationRecord,
   CreateProjectInput,
@@ -2445,44 +2449,166 @@ class PgDatabase implements Database {
     }
   }
 
+  async applyCancelControlOperation(
+    input: ApplyCancelControlOperationInput,
+  ): Promise<ApplyCancelControlOperationResult> {
+    try {
+      return await this.pool.transaction(async (client) => {
+        await this.locks.withTxLock(
+          client,
+          controlOperationLockKey(input.organizationId, input.idempotencyKey),
+        );
+        const existing = await query<ControlOperationRow>(
+          client,
+          `select * from control_operations
+           where organization_id = $1 and idempotency_key = $2`,
+          [input.organizationId, input.idempotencyKey],
+        );
+        const existingRow = existing.rows[0];
+        if (existingRow !== undefined) {
+          return { status: "existing", record: toControlOperationRecord(existingRow) };
+        }
+
+        const targets = await query<AgentExecutionRow>(
+          client,
+          `select * from agent_executions
+           where id = $1 and organization_id = $2
+           for update`,
+          [input.executionId, input.organizationId],
+        );
+        const target = targets.rows[0];
+        if (target === undefined) return { status: "execution_not_found" };
+        if (
+          (target.status !== "spawning" && target.status !== "running") ||
+          target.hub_action !== null
+        ) {
+          return { status: "precondition_failed" };
+        }
+
+        const updated = await query<AgentExecutionRow>(
+          client,
+          `update agent_executions
+           set hub_action = 'interrupt',
+               hub_action_ready_at = null,
+               hub_action_completed_at = null
+           where id = $1 and organization_id = $2
+           returning *`,
+          [input.executionId, input.organizationId],
+        );
+        const execution = updated.rows[0];
+        if (execution === undefined) throw new Error("cancel control update returned no row");
+
+        const committed = await insertControlOperationWithHandle(client, {
+          organizationId: input.organizationId,
+          op: "cancel",
+          status: "applied",
+          idempotencyKey: input.idempotencyKey,
+          executionId: input.executionId,
+          capability: input.capability,
+          subject: input.subject,
+          correlationId: input.correlationId ?? null,
+          effect: { previousHubAction: null, executionStatus: execution.status },
+        });
+        if (!committed.inserted) {
+          return client.rollback({
+            status: "existing",
+            record: committed.record,
+          } satisfies ApplyCancelControlOperationResult);
+        }
+        return { status: "applied", record: committed.record };
+      });
+    } catch (error) {
+      throw toDatabaseError(error);
+    }
+  }
+
+  async applyAcknowledgementControlOperation(
+    input: ApplyAcknowledgementControlOperationInput,
+  ): Promise<ApplyAcknowledgementControlOperationResult> {
+    try {
+      return await this.pool.transaction(async (client) => {
+        await this.locks.withTxLock(
+          client,
+          controlOperationLockKey(input.organizationId, input.idempotencyKey),
+        );
+        const existing = await query<ControlOperationRow>(
+          client,
+          `select * from control_operations
+           where organization_id = $1 and idempotency_key = $2`,
+          [input.organizationId, input.idempotencyKey],
+        );
+        const existingRow = existing.rows[0];
+        if (existingRow !== undefined) {
+          return { status: "existing", record: toControlOperationRecord(existingRow) };
+        }
+
+        const targets = await query<AgentExecutionRow>(
+          client,
+          `select * from agent_executions
+           where id = $1 and organization_id = $2
+           for update`,
+          [input.executionId, input.organizationId],
+        );
+        if (targets.rows[0] === undefined) return { status: "execution_not_found" };
+
+        const field = input.acknowledgement.kind === "terminal" ? "terminal_at" : "idle_at";
+        const state = `coalesce(hub_action_acknowledgements, '{"terminal_at":null,"idle_at":null,"finish_execution_call":null}'::jsonb)`;
+        const updated = await query<AgentExecutionRow>(
+          client,
+          `update agent_executions
+           set hub_action_acknowledgements = jsonb_set(
+             ${state},
+             '{${field}}',
+             case
+               when ${state}->>'${field}' is null
+                 or (${state}->>'${field}')::timestamptz < $3::timestamptz
+                 then to_jsonb($3::timestamptz)
+               else ${state}->'${field}'
+             end,
+             true
+           )
+           where id = $1 and organization_id = $2
+           returning *`,
+          [input.executionId, input.organizationId, input.acknowledgement.observedAt],
+        );
+        if (updated.rows[0] === undefined) {
+          throw new Error("acknowledgement control update returned no row");
+        }
+
+        const committed = await insertControlOperationWithHandle(client, {
+          organizationId: input.organizationId,
+          op: "acknowledge",
+          status: "applied",
+          idempotencyKey: input.idempotencyKey,
+          executionId: input.executionId,
+          capability: input.capability,
+          subject: input.subject,
+          correlationId: input.correlationId ?? null,
+          effect: {
+            acknowledgement: {
+              kind: input.acknowledgement.kind,
+              observedAt: input.acknowledgement.observedAt.toISOString(),
+            },
+          },
+        });
+        if (!committed.inserted) {
+          return client.rollback({
+            status: "existing",
+            record: committed.record,
+          } satisfies ApplyAcknowledgementControlOperationResult);
+        }
+        return { status: "applied", record: committed.record };
+      });
+    } catch (error) {
+      throw toDatabaseError(error);
+    }
+  }
+
   async insertControlOperation(
     input: InsertControlOperationInput,
   ): Promise<{ inserted: boolean; record: ControlOperationRecord }> {
     try {
-      const rows = await query<ControlOperationRow>(
-        this.pool,
-        `insert into control_operations
-           (organization_id, op, status, idempotency_key, execution_id,
-            capability, subject, correlation_id, effect, response)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
-         on conflict (organization_id, idempotency_key) do nothing
-         returning *`,
-        [
-          input.organizationId,
-          input.op,
-          input.status,
-          input.idempotencyKey,
-          input.executionId ?? null,
-          input.capability,
-          input.subject,
-          input.correlationId ?? null,
-          input.effect === undefined ? null : JSON.stringify(input.effect),
-          input.response === undefined ? null : JSON.stringify(input.response),
-        ],
-      );
-      const inserted = rows.rows[0];
-      if (inserted !== undefined) {
-        return { inserted: true, record: toControlOperationRecord(inserted) };
-      }
-      const existing = await query<ControlOperationRow>(
-        this.pool,
-        `select * from control_operations
-         where organization_id = $1 and idempotency_key = $2`,
-        [input.organizationId, input.idempotencyKey],
-      );
-      const row = existing.rows[0];
-      if (row === undefined) throw new Error("control operation conflict row missing");
-      return { inserted: false, record: toControlOperationRecord(row) };
+      return await insertControlOperationWithHandle(this.pool, input);
     } catch (error) {
       throw toDatabaseError(error);
     }
@@ -4440,6 +4566,50 @@ async function query<T extends QueryRow = QueryRow>(
   values: unknown[] = [],
 ) {
   return pool.query<T>(text, values);
+}
+
+function controlOperationLockKey(organizationId: string, idempotencyKey: string): string {
+  return `control-operation:${organizationId}:${idempotencyKey}`;
+}
+
+async function insertControlOperationWithHandle(
+  handle: QueryHandle,
+  input: InsertControlOperationInput,
+): Promise<{ inserted: boolean; record: ControlOperationRecord }> {
+  const rows = await query<ControlOperationRow>(
+    handle,
+    `insert into control_operations
+       (organization_id, op, status, idempotency_key, execution_id,
+        capability, subject, correlation_id, effect, response)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
+     on conflict (organization_id, idempotency_key) do nothing
+     returning *`,
+    [
+      input.organizationId,
+      input.op,
+      input.status,
+      input.idempotencyKey,
+      input.executionId ?? null,
+      input.capability,
+      input.subject,
+      input.correlationId ?? null,
+      input.effect === undefined ? null : JSON.stringify(input.effect),
+      input.response === undefined ? null : JSON.stringify(input.response),
+    ],
+  );
+  const inserted = rows.rows[0];
+  if (inserted !== undefined) {
+    return { inserted: true, record: toControlOperationRecord(inserted) };
+  }
+  const existing = await query<ControlOperationRow>(
+    handle,
+    `select * from control_operations
+     where organization_id = $1 and idempotency_key = $2`,
+    [input.organizationId, input.idempotencyKey],
+  );
+  const row = existing.rows[0];
+  if (row === undefined) throw new Error("control operation conflict row missing");
+  return { inserted: false, record: toControlOperationRecord(row) };
 }
 
 function stringArray(value: unknown): string[] {
