@@ -8,6 +8,10 @@ import type {
   AgentExecutionOutputAttempt,
   AgentExecutionHubAcknowledgementInput,
   AgentExecutionHubAcknowledgements,
+  ApplyAcknowledgementControlOperationInput,
+  ApplyAcknowledgementControlOperationResult,
+  ApplyCancelControlOperationInput,
+  ApplyCancelControlOperationResult,
   ControlOperationRecord,
   Database,
   InsertAgentExecutionInput,
@@ -1998,9 +2002,116 @@ class MemoryDatabase implements Database {
     return updated;
   }
 
-  async insertControlOperation(
+  async applyCancelControlOperation(
+    input: ApplyCancelControlOperationInput,
+  ): Promise<ApplyCancelControlOperationResult> {
+    return this.withAdvisoryLock(
+      `control-operation:${input.organizationId}:${input.idempotencyKey}`,
+      async () => {
+        const existingId = this.controlOperationIdsByKey.get(
+          `${input.organizationId}:${input.idempotencyKey}`,
+        );
+        if (existingId !== undefined) {
+          const existing = this.controlOperations.get(existingId);
+          if (existing === undefined) throw new Error("control operation conflict row missing");
+          return { status: "existing", record: existing };
+        }
+        const execution = this.agentExecutions.get(input.executionId);
+        if (execution === undefined || execution.organizationId !== input.organizationId) {
+          return { status: "execution_not_found" };
+        }
+        if (
+          (execution.status !== "spawning" && execution.status !== "running") ||
+          execution.hubAction !== null
+        ) {
+          return { status: "precondition_failed" };
+        }
+        this.agentExecutions.set(input.executionId, {
+          ...execution,
+          hubAction: "interrupt",
+          hubActionReadyAt: null,
+          hubActionCompletedAt: null,
+        });
+        const committed = this.insertControlOperationRecord({
+          organizationId: input.organizationId,
+          op: "cancel",
+          status: "applied",
+          idempotencyKey: input.idempotencyKey,
+          executionId: input.executionId,
+          capability: input.capability,
+          subject: input.subject,
+          correlationId: input.correlationId ?? null,
+          effect: { previousHubAction: null, executionStatus: execution.status },
+        });
+        return committed.inserted
+          ? { status: "applied", record: committed.record }
+          : { status: "existing", record: committed.record };
+      },
+    );
+  }
+
+  async applyAcknowledgementControlOperation(
+    input: ApplyAcknowledgementControlOperationInput,
+  ): Promise<ApplyAcknowledgementControlOperationResult> {
+    return this.withAdvisoryLock(
+      `control-operation:${input.organizationId}:${input.idempotencyKey}`,
+      async () => {
+        const existingId = this.controlOperationIdsByKey.get(
+          `${input.organizationId}:${input.idempotencyKey}`,
+        );
+        if (existingId !== undefined) {
+          const existing = this.controlOperations.get(existingId);
+          if (existing === undefined) throw new Error("control operation conflict row missing");
+          return { status: "existing", record: existing };
+        }
+        const execution = this.agentExecutions.get(input.executionId);
+        if (execution === undefined || execution.organizationId !== input.organizationId) {
+          return { status: "execution_not_found" };
+        }
+        const acknowledgements = { ...execution.hubActionAcknowledgements };
+        if (input.acknowledgement.kind === "terminal") {
+          if (
+            acknowledgements.terminalAt === null ||
+            input.acknowledgement.observedAt.getTime() > acknowledgements.terminalAt.getTime()
+          ) {
+            acknowledgements.terminalAt = input.acknowledgement.observedAt;
+          }
+        } else if (
+          acknowledgements.idleAt === null ||
+          input.acknowledgement.observedAt.getTime() > acknowledgements.idleAt.getTime()
+        ) {
+          acknowledgements.idleAt = input.acknowledgement.observedAt;
+        }
+        this.agentExecutions.set(input.executionId, {
+          ...execution,
+          hubActionAcknowledgements: acknowledgements,
+        });
+        const committed = this.insertControlOperationRecord({
+          organizationId: input.organizationId,
+          op: "acknowledge",
+          status: "applied",
+          idempotencyKey: input.idempotencyKey,
+          executionId: input.executionId,
+          capability: input.capability,
+          subject: input.subject,
+          correlationId: input.correlationId ?? null,
+          effect: {
+            acknowledgement: {
+              kind: input.acknowledgement.kind,
+              observedAt: input.acknowledgement.observedAt.toISOString(),
+            },
+          },
+        });
+        return committed.inserted
+          ? { status: "applied", record: committed.record }
+          : { status: "existing", record: committed.record };
+      },
+    );
+  }
+
+  private insertControlOperationRecord(
     input: InsertControlOperationInput,
-  ): Promise<{ inserted: boolean; record: ControlOperationRecord }> {
+  ): { inserted: boolean; record: ControlOperationRecord } {
     const key = `${input.organizationId}:${input.idempotencyKey}`;
     const existingId = this.controlOperationIdsByKey.get(key);
     if (existingId !== undefined) {
@@ -2008,7 +2119,7 @@ class MemoryDatabase implements Database {
       if (existing === undefined) throw new Error("control operation conflict row missing");
       return { inserted: false, record: existing };
     }
-    const now = new Date();
+    const now = this.now();
     const record: ControlOperationRecord = {
       id: randomUUID(),
       organizationId: input.organizationId,
@@ -2027,6 +2138,12 @@ class MemoryDatabase implements Database {
     this.controlOperations.set(record.id, record);
     this.controlOperationIdsByKey.set(key, record.id);
     return { inserted: true, record };
+  }
+
+  async insertControlOperation(
+    input: InsertControlOperationInput,
+  ): Promise<{ inserted: boolean; record: ControlOperationRecord }> {
+    return this.insertControlOperationRecord(input);
   }
 
   async findControlOperationByKey(
