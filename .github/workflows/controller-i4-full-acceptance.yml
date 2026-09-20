@@ -58,6 +58,8 @@ jobs:
 
   browser-e2e:
     runs-on: ubuntu-24.04
+    env:
+      PASEO_E2E_WORKTREE: ${{ github.workspace }}/paseo-source
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Check out exact Paseo source
