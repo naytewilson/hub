@@ -1,11 +1,11 @@
 /**
  * I4 Hub Control Contract V1 — shared control-operation executor.
  *
- * Every control op runs the same spine: idempotency-key validation → ANVIL
- * capability check (server-side, durable, against the parallel ownership-map
- * contract — NEVER a transport scope) → per-op effect → durable idempotent
- * record in `control_operations`. Replays return the STORED operation with
- * `replayed: true`; a different op under an already-used key is a 409.
+ * Every control op runs the frozen V1 spine: idempotency-key validation →
+ * stored-key replay/conflict → ANVIL capability check for NEW effects →
+ * target/precondition → durable effect + operation record. Replays return the
+ * STORED operation with `replayed: true` and exercise no new authority; a
+ * different op/target under an already-used key is a 409.
  */
 import type {
   AgentExecutionHubAcknowledgementInput,
@@ -193,10 +193,7 @@ export async function invokeControlOperation(
   // check. Replaying an operation that already executed under valid authority
   // exercises no new authority and must continue to work when the authority
   // seam is temporarily unavailable or the original grant later expires.
-  const prior = await repository.findControlOperationByKey(
-    organizationId,
-    input.idempotencyKey,
-  );
+  const prior = await repository.findControlOperationByKey(organizationId, input.idempotencyKey);
   if (prior !== undefined) {
     return replayOrConflict(prior, op, input);
   }
