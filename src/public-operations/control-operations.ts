@@ -118,11 +118,13 @@ export function replayOrConflict(
   return { status: "idempotency_key_conflict", existingOperationId: existing.id };
 }
 
-function startRequestTarget(effect: unknown): {
-  trigger: string;
-  projectSlug: string;
-  expectedVersionId: string | null;
-} | undefined {
+function startRequestTarget(effect: unknown):
+  | {
+      trigger: string;
+      projectSlug: string;
+      expectedVersionId: string | null;
+    }
+  | undefined {
   if (typeof effect !== "object" || effect === null || !("requestTarget" in effect)) {
     return undefined;
   }
