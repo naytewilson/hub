@@ -147,6 +147,83 @@ describe("agent execution PostgreSQL repository", () => {
     }
   });
 
+  it("finalizes one durable approved-start claim in place", async () => {
+    const fixture = await executionFixture(postgres);
+    try {
+      const claimed = await fixture.database.insertControlOperation({
+        organizationId: "org-1",
+        op: "execution_start",
+        status: "recorded",
+        idempotencyKey: "atomic-start-claim",
+        executionId: null,
+        capability: "control.execution_start",
+        subject: "machine:test",
+        correlationId: "correlation-start",
+        effect: {
+          requestTarget: {
+            trigger: "manual",
+            projectSlug: "project",
+            expectedVersionId: null,
+          },
+          dispatchRequest: {
+            projectId: fixture.execution.projectId,
+            projectSlug: "project",
+            trigger: "manual",
+            expectedVersionId: null,
+            actor: "machine:test",
+            deliveryKey: "control-atomic-start-claim",
+            inputPresent: false,
+            input: null,
+            credentialKind: "apiKey",
+            credentialId: "key-1",
+          },
+        },
+      });
+      assert.equal(claimed.inserted, true);
+      assert.equal(claimed.record.status, "recorded");
+
+      const effect = {
+        providerEventReceiptId: "receipt-start",
+        triggerRunId: "run-start",
+        configuredTriggerName: "manual",
+        requestTarget: {
+          trigger: "manual",
+          projectSlug: "project",
+          expectedVersionId: null,
+        },
+        dispatchRequest: {
+          projectId: fixture.execution.projectId,
+          projectSlug: "project",
+          trigger: "manual",
+          expectedVersionId: null,
+          actor: "machine:test",
+          deliveryKey: "control-atomic-start-claim",
+          inputPresent: false,
+          input: null,
+          credentialKind: "apiKey",
+          credentialId: "key-1",
+        },
+      };
+      const finalized = await fixture.database.completeStartControlOperation({
+        organizationId: "org-1",
+        operationId: claimed.record.id,
+        effect,
+      });
+      assert.ok(finalized);
+      assert.equal(finalized.status, "applied");
+      assert.deepEqual(finalized.effect, effect);
+
+      const persisted = await fixture.database.findControlOperationById(
+        "org-1",
+        claimed.record.id,
+      );
+      assert.equal(persisted?.status, "applied");
+      assert.deepEqual(persisted?.effect, effect);
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
   it("persists one run, one step, explicit execution ownership, and idempotent finish", async () => {
     const fixture = await executionFixture(postgres);
     try {
