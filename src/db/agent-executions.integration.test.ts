@@ -83,10 +83,7 @@ describe("agent execution PostgreSQL repository", () => {
         fixture.database.applyCancelControlOperation(input),
         fixture.database.applyCancelControlOperation(input),
       ]);
-      assert.deepEqual(
-        results.map(({ status }) => status).sort(),
-        ["applied", "existing"],
-      );
+      assert.deepEqual(results.map(({ status }) => status).sort(), ["applied", "existing"]);
       const applied = results.find((result) => result.status === "applied");
       const existing = results.find((result) => result.status === "existing");
       assert.ok(applied);
@@ -125,10 +122,7 @@ describe("agent execution PostgreSQL repository", () => {
         fixture.database.applyAcknowledgementControlOperation(input),
         fixture.database.applyAcknowledgementControlOperation(input),
       ]);
-      assert.deepEqual(
-        results.map(({ status }) => status).sort(),
-        ["applied", "existing"],
-      );
+      assert.deepEqual(results.map(({ status }) => status).sort(), ["applied", "existing"]);
       const applied = results.find((result) => result.status === "applied");
       const existing = results.find((result) => result.status === "existing");
       assert.ok(applied);
@@ -136,7 +130,10 @@ describe("agent execution PostgreSQL repository", () => {
       assert.equal(existing.record.id, applied.record.id);
 
       const persisted = await fixture.database.findAgentExecutionById(fixture.execution.id);
-      assert.equal(persisted?.hubActionAcknowledgements.terminalAt?.toISOString(), observedAt.toISOString());
+      assert.equal(
+        persisted?.hubActionAcknowledgements.terminalAt?.toISOString(),
+        observedAt.toISOString(),
+      );
       const operations = await fixture.database.listControlOperations("org-1", {
         executionId: fixture.execution.id,
         op: "acknowledge",
