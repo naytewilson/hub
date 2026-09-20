@@ -552,7 +552,7 @@ function controlOperationEffectForWire(record: ControlOperationRecord): unknown 
     return effect;
   }
   const publicEffect = { ...(effect as Record<string, unknown>) };
-  delete publicEffect.requestTarget;
+  delete publicEffect["requestTarget"];
   return publicEffect;
 }
 
