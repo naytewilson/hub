@@ -2149,11 +2149,11 @@ class MemoryDatabase implements Database {
     if (
       existing === undefined ||
       existing.organizationId !== input.organizationId ||
-      existing.op !== "execution_start" ||
-      (existing.status !== "recorded" && existing.status !== "applied")
+      existing.op !== "execution_start"
     ) {
       return undefined;
     }
+    if (existing.status === "applied") return existing;
     const updated: ControlOperationRecord = {
       ...existing,
       status: "applied",
