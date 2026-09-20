@@ -3,6 +3,10 @@ import type { HubBundleFile } from "../config/bundle.js";
 import type {
   AgentExecutionHubAcknowledgementInput,
   AgentExecutionRecord,
+  ApplyAcknowledgementControlOperationInput,
+  ApplyAcknowledgementControlOperationResult,
+  ApplyCancelControlOperationInput,
+  ApplyCancelControlOperationResult,
   ControlOperationRecord,
   ControlOperationStatus,
   InsertControlOperationInput,
@@ -449,6 +453,12 @@ export interface PublicOperationRepository {
     executionId: string,
     acknowledgement: AgentExecutionHubAcknowledgementInput,
   ): Promise<AgentExecutionRecord | undefined>;
+  applyCancelControlOperation(
+    input: ApplyCancelControlOperationInput,
+  ): Promise<ApplyCancelControlOperationResult>;
+  applyAcknowledgementControlOperation(
+    input: ApplyAcknowledgementControlOperationInput,
+  ): Promise<ApplyAcknowledgementControlOperationResult>;
   insertControlOperation(
     input: InsertControlOperationInput,
   ): Promise<{ inserted: boolean; record: ControlOperationRecord }>;
