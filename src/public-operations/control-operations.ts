@@ -1,11 +1,11 @@
 /**
  * I4 Hub Control Contract V1 — shared control-operation executor.
  *
- * Every control op runs the same spine: idempotency-key validation → ANVIL
- * capability check (server-side, durable, against the parallel ownership-map
- * contract — NEVER a transport scope) → per-op effect → durable idempotent
- * record in `control_operations`. Replays return the STORED operation with
- * `replayed: true`; a different op under an already-used key is a 409.
+ * Every control op runs the frozen V1 spine: idempotency-key validation →
+ * stored-key replay/conflict resolution → ANVIL capability check for NEW effects →
+ * target/precondition → durable effect + operation record. Replays return the
+ * STORED operation with `replayed: true` and exercise no new authority; a
+ * different op/target under an already-used key is a 409.
  */
 import type {
   AgentExecutionHubAcknowledgementInput,
@@ -31,10 +31,17 @@ export interface ControlInvocationInput {
   idempotencyKey: string;
   correlationId?: string | undefined;
   executionId?: string | undefined;
+  attentionKind?: "terminal" | "idle" | "finish_execution_call" | undefined;
+}
+
+export interface ControlAuthorizationContext {
+  capability: string;
+  subject: string;
 }
 
 export type ControlOutcome =
   | { status: "ok"; durability: "applied" | "recorded"; effect: unknown }
+  | { status: "committed"; record: ControlOperationRecord }
   | { status: "execution_not_found" }
   | { status: "control_precondition_failed"; reason: string }
   | { status: "replay_stored"; existing: ControlOperationRecord };
@@ -81,12 +88,131 @@ export async function checkControlCapability(
   return allowed ? { allowed: true } : { allowed: false, capability };
 }
 
+function acknowledgementKind(effect: unknown): string | undefined {
+  if (typeof effect !== "object" || effect === null || !("acknowledgement" in effect)) {
+    return undefined;
+  }
+  const acknowledgement = effect.acknowledgement;
+  if (
+    typeof acknowledgement !== "object" ||
+    acknowledgement === null ||
+    !("kind" in acknowledgement)
+  ) {
+    return undefined;
+  }
+  const kind = acknowledgement.kind;
+  return typeof kind === "string" ? kind : undefined;
+}
+
 export function replayOrConflict(
   existing: ControlOperationRecord,
   op: ControlOp,
-  executionId: string | undefined,
+  input: ControlInvocationInput,
 ): Extract<ControlExecutionResult, { status: "replayed" | "idempotency_key_conflict" }> {
-  if (existing.op === op && existing.executionId === (executionId ?? null)) {
+  const sameTarget =
+    existing.op === op &&
+    existing.executionId === (input.executionId ?? null) &&
+    (op !== "acknowledge" ||
+      input.attentionKind === undefined ||
+      acknowledgementKind(existing.effect) === input.attentionKind);
+  if (sameTarget) {
+    return {
+      status: "replayed",
+      operation: { ...toControlOperationWire(existing), replayed: true as const },
+    };
+  }
+  return { status: "idempotency_key_conflict", existingOperationId: existing.id };
+}
+
+export interface StartRequestTarget {
+  trigger: string;
+  projectSlug: string;
+  expectedVersionId: string | null;
+}
+
+export interface StartDispatchClaim extends StartRequestTarget {
+  projectId: string;
+  actor: string;
+  deliveryKey: string;
+  inputPresent: boolean;
+  input: unknown;
+  credentialKind: "apiKey" | "cliCredential";
+  credentialId: string;
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function unknownRecord(value: unknown): Record<string, unknown> | undefined {
+  return isUnknownRecord(value) ? value : undefined;
+}
+
+export function startRequestTarget(effect: unknown): StartRequestTarget | undefined {
+  const effectRecord = unknownRecord(effect);
+  const target = unknownRecord(effectRecord?.["requestTarget"]);
+  if (target === undefined) return undefined;
+  const trigger = target["trigger"];
+  const projectSlug = target["projectSlug"];
+  const expectedVersionId = target["expectedVersionId"];
+  if (typeof trigger !== "string" || typeof projectSlug !== "string") return undefined;
+  if (expectedVersionId !== null && typeof expectedVersionId !== "string") return undefined;
+  return { trigger, projectSlug, expectedVersionId };
+}
+
+export function startDispatchClaim(effect: unknown): StartDispatchClaim | undefined {
+  const effectRecord = unknownRecord(effect);
+  const claim = unknownRecord(effectRecord?.["dispatchRequest"]);
+  if (claim === undefined) return undefined;
+  const projectId = claim["projectId"];
+  const projectSlug = claim["projectSlug"];
+  const trigger = claim["trigger"];
+  const expectedVersionId = claim["expectedVersionId"];
+  const actor = claim["actor"];
+  const deliveryKey = claim["deliveryKey"];
+  const inputPresent = claim["inputPresent"];
+  const credentialKind = claim["credentialKind"];
+  const credentialId = claim["credentialId"];
+  if (
+    typeof projectId !== "string" ||
+    typeof projectSlug !== "string" ||
+    typeof trigger !== "string" ||
+    typeof actor !== "string" ||
+    typeof deliveryKey !== "string" ||
+    typeof inputPresent !== "boolean" ||
+    typeof credentialId !== "string" ||
+    (credentialKind !== "apiKey" && credentialKind !== "cliCredential")
+  ) {
+    return undefined;
+  }
+  if (expectedVersionId !== null && typeof expectedVersionId !== "string") return undefined;
+  return {
+    projectId,
+    projectSlug,
+    trigger,
+    expectedVersionId,
+    actor,
+    deliveryKey,
+    inputPresent,
+    input: claim["input"],
+    credentialKind,
+    credentialId,
+  };
+}
+
+export function replayStartOrConflict(
+  existing: ControlOperationRecord,
+  input: StartApprovedExecutionInput,
+): Extract<ControlExecutionResult, { status: "replayed" | "idempotency_key_conflict" }> {
+  const target = startRequestTarget(existing.effect);
+  const sameTarget =
+    existing.op === "execution_start" &&
+    existing.executionId === null &&
+    target !== undefined &&
+    target.trigger === input.trigger &&
+    target.projectSlug === input.projectSlug &&
+    target.expectedVersionId === (input.expectedVersionId ?? null);
+  if (sameTarget) {
     return {
       status: "replayed",
       operation: { ...toControlOperationWire(existing), replayed: true as const },
@@ -112,13 +238,25 @@ export async function invokeControlOperation(
   authorization: PublicAuthorization,
   op: ControlOp,
   input: ControlInvocationInput,
-  execute: (target: AgentExecutionRecord | undefined) => Promise<ControlOutcome>,
+  execute: (
+    target: AgentExecutionRecord | undefined,
+    authorizationContext: ControlAuthorizationContext,
+  ) => Promise<ControlOutcome>,
 ): Promise<ControlExecutionResult> {
   const { repository, capabilities } = executor;
   const organizationId = authorization.organizationId;
 
   const issues = validateControlInput(input);
   if (issues.length > 0) return { status: "invalid_input", issues };
+
+  // Frozen V1 ordering: idempotency replay precedes the ANVIL capability
+  // check. Replaying an operation that already executed under valid authority
+  // exercises no new authority and must continue to work when the authority
+  // seam is temporarily unavailable or the original grant later expires.
+  const prior = await repository.findControlOperationByKey(organizationId, input.idempotencyKey);
+  if (prior !== undefined) {
+    return replayOrConflict(prior, op, input);
+  }
 
   const authority = resolveControlAuthority(capabilities);
   if (authority === undefined) return { status: "control_plane_unavailable" };
@@ -132,18 +270,17 @@ export async function invokeControlOperation(
     input.executionId === undefined
       ? undefined
       : await repository.findAgentExecution(organizationId, input.executionId);
+  const authorizationContext: ControlAuthorizationContext = {
+    capability: controlCapabilityFor(op),
+    subject: authority.reader.subjectLabel(),
+  };
 
-  // Idempotency first: a replayed key returns the stored operation without
-  // re-executing any effect. The unique (organization_id, idempotency_key)
-  // constraint remains the race backstop for concurrent duplicates.
-  const prior = await repository.findControlOperationByKey(organizationId, input.idempotencyKey);
-  if (prior !== undefined) {
-    return replayOrConflict(prior, op, input.executionId);
-  }
-
-  const outcome = await execute(target);
+  const outcome = await execute(target, authorizationContext);
   if (outcome.status === "replay_stored") {
-    return replayOrConflict(outcome.existing, op, input.executionId);
+    return replayOrConflict(outcome.existing, op, input);
+  }
+  if (outcome.status === "committed") {
+    return { status: outcome.record.status, operation: toControlOperationWire(outcome.record) };
   }
   if (outcome.status !== "ok") return outcome;
 
@@ -153,22 +290,22 @@ export async function invokeControlOperation(
     status: outcome.durability,
     idempotencyKey: input.idempotencyKey,
     executionId: input.executionId ?? null,
-    capability: controlCapabilityFor(op),
-    subject: authority.reader.subjectLabel(),
+    capability: authorizationContext.capability,
+    subject: authorizationContext.subject,
     correlationId: input.correlationId ?? null,
     effect: outcome.effect,
   });
   if (inserted) {
     return { status: outcome.durability, operation: toControlOperationWire(record) };
   }
-  return replayOrConflict(record, op, input.executionId);
+  return replayOrConflict(record, op, input);
 }
 
 /** Builds the Hub acknowledgement input for the attention kinds the control plane owns. */
 export function toHubAcknowledgement(
   kind: "terminal" | "idle",
   observedAt: Date,
-): AgentExecutionHubAcknowledgementInput {
+): Extract<AgentExecutionHubAcknowledgementInput, { kind: "terminal" | "idle" }> {
   return kind === "terminal" ? { kind: "terminal", observedAt } : { kind: "idle", observedAt };
 }
 

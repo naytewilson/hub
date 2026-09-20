@@ -3,6 +3,11 @@ import type { HubBundleFile } from "../config/bundle.js";
 import type {
   AgentExecutionHubAcknowledgementInput,
   AgentExecutionRecord,
+  ApplyAcknowledgementControlOperationInput,
+  ApplyAcknowledgementControlOperationResult,
+  ApplyCancelControlOperationInput,
+  ApplyCancelControlOperationResult,
+  CompleteStartControlOperationInput,
   ControlOperationRecord,
   ControlOperationStatus,
   InsertControlOperationInput,
@@ -449,6 +454,15 @@ export interface PublicOperationRepository {
     executionId: string,
     acknowledgement: AgentExecutionHubAcknowledgementInput,
   ): Promise<AgentExecutionRecord | undefined>;
+  applyCancelControlOperation(
+    input: ApplyCancelControlOperationInput,
+  ): Promise<ApplyCancelControlOperationResult>;
+  applyAcknowledgementControlOperation(
+    input: ApplyAcknowledgementControlOperationInput,
+  ): Promise<ApplyAcknowledgementControlOperationResult>;
+  completeStartControlOperation(
+    input: CompleteStartControlOperationInput,
+  ): Promise<ControlOperationRecord | undefined>;
   insertControlOperation(
     input: InsertControlOperationInput,
   ): Promise<{ inserted: boolean; record: ControlOperationRecord }>;
@@ -541,6 +555,19 @@ export interface ControlOperationWire {
   updatedAt: string;
 }
 
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function controlOperationEffectForWire(record: ControlOperationRecord): unknown {
+  const effect = record.effect;
+  if (record.op !== "execution_start" || !isUnknownRecord(effect)) return effect;
+  const publicEffect = { ...effect };
+  delete publicEffect["requestTarget"];
+  delete publicEffect["dispatchRequest"];
+  return publicEffect;
+}
+
 export function toControlOperationWire(record: ControlOperationRecord): ControlOperationWire {
   return {
     operationId: record.id,
@@ -551,7 +578,7 @@ export function toControlOperationWire(record: ControlOperationRecord): ControlO
     capability: record.capability,
     subject: record.subject,
     correlationId: record.correlationId,
-    effect: record.effect,
+    effect: controlOperationEffectForWire(record),
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
   };

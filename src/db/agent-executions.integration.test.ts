@@ -68,6 +68,210 @@ describe("agent execution PostgreSQL repository", () => {
     }
   });
 
+  it("atomically couples cancel effect and idempotency receipt under same-key concurrency", async () => {
+    const fixture = await executionFixture(postgres);
+    try {
+      const input = {
+        organizationId: "org-1",
+        executionId: fixture.execution.id,
+        idempotencyKey: "atomic-cancel",
+        capability: "control.cancel",
+        subject: "machine:test",
+        correlationId: "correlation-cancel",
+      };
+      const results = await Promise.all([
+        fixture.database.applyCancelControlOperation(input),
+        fixture.database.applyCancelControlOperation(input),
+      ]);
+      assert.deepEqual(results.map(({ status }) => status).sort(), ["applied", "existing"]);
+      const applied = results.find((result) => result.status === "applied");
+      const existing = results.find((result) => result.status === "existing");
+      assert.ok(applied);
+      assert.ok(existing);
+      assert.equal(existing.record.id, applied.record.id);
+
+      const persisted = await fixture.database.findAgentExecutionById(fixture.execution.id);
+      assert.equal(persisted?.hubAction, "interrupt");
+      const operations = await fixture.database.listControlOperations("org-1", {
+        executionId: fixture.execution.id,
+        op: "cancel",
+        status: "applied",
+        limit: 10,
+      });
+      assert.equal(operations.length, 1);
+      assert.equal(operations[0]?.id, applied.record.id);
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("atomically couples acknowledgement effect and idempotency receipt under same-key concurrency", async () => {
+    const fixture = await executionFixture(postgres);
+    const observedAt = new Date("2026-09-20T00:00:00.000Z");
+    try {
+      const input = {
+        organizationId: "org-1",
+        executionId: fixture.execution.id,
+        idempotencyKey: "atomic-ack",
+        capability: "control.acknowledge",
+        subject: "machine:test",
+        correlationId: "correlation-ack",
+        acknowledgement: { kind: "terminal" as const, observedAt },
+      };
+      const results = await Promise.all([
+        fixture.database.applyAcknowledgementControlOperation(input),
+        fixture.database.applyAcknowledgementControlOperation(input),
+      ]);
+      assert.deepEqual(results.map(({ status }) => status).sort(), ["applied", "existing"]);
+      const applied = results.find((result) => result.status === "applied");
+      const existing = results.find((result) => result.status === "existing");
+      assert.ok(applied);
+      assert.ok(existing);
+      assert.equal(existing.record.id, applied.record.id);
+
+      const persisted = await fixture.database.findAgentExecutionById(fixture.execution.id);
+      assert.equal(
+        persisted?.hubActionAcknowledgements.terminalAt?.toISOString(),
+        observedAt.toISOString(),
+      );
+      const operations = await fixture.database.listControlOperations("org-1", {
+        executionId: fixture.execution.id,
+        op: "acknowledge",
+        status: "applied",
+        limit: 10,
+      });
+      assert.equal(operations.length, 1);
+      assert.equal(operations[0]?.id, applied.record.id);
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("keeps the control ledger winner consistent with effects when start races cancel", async () => {
+    const fixture = await executionFixture(postgres);
+    const idempotencyKey = "start-cancel-race";
+    try {
+      const [startClaim, cancel] = await Promise.all([
+        fixture.database.insertControlOperation({
+          organizationId: "org-1",
+          op: "execution_start",
+          status: "recorded",
+          idempotencyKey,
+          executionId: null,
+          capability: "control.execution_start",
+          subject: "machine:test",
+          effect: {
+            requestTarget: {
+              trigger: "manual",
+              projectSlug: "project",
+              expectedVersionId: null,
+            },
+          },
+        }),
+        fixture.database.applyCancelControlOperation({
+          organizationId: "org-1",
+          executionId: fixture.execution.id,
+          idempotencyKey,
+          capability: "control.cancel",
+          subject: "machine:test",
+        }),
+      ]);
+
+      const operations = await fixture.database.listControlOperations("org-1", { limit: 10 });
+      assert.equal(operations.length, 1);
+      const winner = operations[0];
+      assert.ok(winner);
+      const execution = await fixture.database.findAgentExecutionById(fixture.execution.id);
+      assert.ok(execution);
+
+      if (startClaim.inserted) {
+        assert.equal(winner.op, "execution_start");
+        assert.equal(cancel.status, "existing");
+        assert.equal(execution.hubAction, null);
+      } else {
+        assert.equal(winner.op, "cancel");
+        assert.equal(cancel.status, "applied");
+        assert.equal(execution.hubAction, "interrupt");
+      }
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("finalizes one durable approved-start claim in place", async () => {
+    const fixture = await executionFixture(postgres);
+    try {
+      const claimed = await fixture.database.insertControlOperation({
+        organizationId: "org-1",
+        op: "execution_start",
+        status: "recorded",
+        idempotencyKey: "atomic-start-claim",
+        executionId: null,
+        capability: "control.execution_start",
+        subject: "machine:test",
+        correlationId: "correlation-start",
+        effect: {
+          requestTarget: {
+            trigger: "manual",
+            projectSlug: "project",
+            expectedVersionId: null,
+          },
+          dispatchRequest: {
+            projectId: fixture.execution.projectId,
+            projectSlug: "project",
+            trigger: "manual",
+            expectedVersionId: null,
+            actor: "machine:test",
+            deliveryKey: "control-atomic-start-claim",
+            inputPresent: false,
+            input: null,
+            credentialKind: "apiKey",
+            credentialId: "key-1",
+          },
+        },
+      });
+      assert.equal(claimed.inserted, true);
+      assert.equal(claimed.record.status, "recorded");
+
+      const effect = {
+        providerEventReceiptId: "receipt-start",
+        triggerRunId: "run-start",
+        configuredTriggerName: "manual",
+        requestTarget: {
+          trigger: "manual",
+          projectSlug: "project",
+          expectedVersionId: null,
+        },
+        dispatchRequest: {
+          projectId: fixture.execution.projectId,
+          projectSlug: "project",
+          trigger: "manual",
+          expectedVersionId: null,
+          actor: "machine:test",
+          deliveryKey: "control-atomic-start-claim",
+          inputPresent: false,
+          input: null,
+          credentialKind: "apiKey",
+          credentialId: "key-1",
+        },
+      };
+      const finalized = await fixture.database.completeStartControlOperation({
+        organizationId: "org-1",
+        operationId: claimed.record.id,
+        effect,
+      });
+      assert.ok(finalized);
+      assert.equal(finalized.status, "applied");
+      assert.deepEqual(finalized.effect, effect);
+
+      const persisted = await fixture.database.findControlOperationById("org-1", claimed.record.id);
+      assert.equal(persisted?.status, "applied");
+      assert.deepEqual(persisted?.effect, effect);
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
   it("persists one run, one step, explicit execution ownership, and idempotent finish", async () => {
     const fixture = await executionFixture(postgres);
     try {

@@ -109,6 +109,31 @@ function makeRepository(): ControlTestRepository {
   const acknowledgementRequests: string[] = [];
   const projects = new Map<string, { id: string; disabled: boolean }>();
   const dispatchInputs: unknown[] = [];
+  const insertControlOperationRecord = (
+    input: InsertControlOperationInput,
+  ): { inserted: boolean; record: ControlOperationRecord } => {
+    const key = `${input.organizationId}:${input.idempotencyKey}`;
+    const existing = opsByKey.get(key);
+    if (existing !== undefined) return { inserted: false, record: existing };
+    const record: ControlOperationRecord = {
+      id: randomUUID(),
+      organizationId: input.organizationId,
+      op: input.op,
+      status: input.status,
+      idempotencyKey: input.idempotencyKey,
+      executionId: input.executionId ?? null,
+      capability: input.capability,
+      subject: input.subject,
+      correlationId: input.correlationId ?? null,
+      effect: input.effect ?? null,
+      response: input.response ?? null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    opsByKey.set(key, record);
+    opsById.set(record.id, record);
+    return { inserted: true, record };
+  };
   const repo: ControlTestRepository = {
     executions,
     opsById,
@@ -185,31 +210,118 @@ function makeRepository(): ControlTestRepository {
       executions.set(executionId, updated);
       return Promise.resolve(updated);
     },
-    insertControlOperation: (input: InsertControlOperationInput) => {
-      const key = `${input.organizationId}:${input.idempotencyKey}`;
-      const existing = opsByKey.get(key);
+    applyCancelControlOperation: (input) => {
+      const existing = opsByKey.get(`${input.organizationId}:${input.idempotencyKey}`);
       if (existing !== undefined) {
-        return Promise.resolve({ inserted: false, record: existing });
+        return Promise.resolve({ status: "existing" as const, record: existing });
       }
-      const record: ControlOperationRecord = {
-        id: randomUUID(),
+      hubActionRequests.push(`${input.organizationId}:${input.executionId}:interrupt`);
+      const execution = executions.get(input.executionId);
+      if (execution === undefined || execution.organizationId !== input.organizationId) {
+        return Promise.resolve({ status: "execution_not_found" as const });
+      }
+      if (
+        (execution.status !== "spawning" && execution.status !== "running") ||
+        execution.hubAction !== null
+      ) {
+        return Promise.resolve({ status: "precondition_failed" as const });
+      }
+      executions.set(input.executionId, {
+        ...execution,
+        hubAction: "interrupt",
+        hubActionReadyAt: null,
+        hubActionCompletedAt: null,
+      });
+      const committed = insertControlOperationRecord({
         organizationId: input.organizationId,
-        op: input.op,
-        status: input.status,
+        op: "cancel",
+        status: "applied",
         idempotencyKey: input.idempotencyKey,
-        executionId: input.executionId ?? null,
+        executionId: input.executionId,
         capability: input.capability,
         subject: input.subject,
         correlationId: input.correlationId ?? null,
-        effect: input.effect ?? null,
-        response: input.response ?? null,
-        createdAt: new Date(),
+        effect: { previousHubAction: null, executionStatus: execution.status },
+      });
+      return Promise.resolve(
+        committed.inserted
+          ? { status: "applied" as const, record: committed.record }
+          : { status: "existing" as const, record: committed.record },
+      );
+    },
+    applyAcknowledgementControlOperation: (input) => {
+      const existing = opsByKey.get(`${input.organizationId}:${input.idempotencyKey}`);
+      if (existing !== undefined) {
+        return Promise.resolve({ status: "existing" as const, record: existing });
+      }
+      acknowledgementRequests.push(
+        `${input.organizationId}:${input.executionId}:${input.acknowledgement.kind}`,
+      );
+      const execution = executions.get(input.executionId);
+      if (execution === undefined || execution.organizationId !== input.organizationId) {
+        return Promise.resolve({ status: "execution_not_found" as const });
+      }
+      const acknowledgements = { ...execution.hubActionAcknowledgements };
+      if (input.acknowledgement.kind === "terminal") {
+        if (
+          acknowledgements.terminalAt === null ||
+          input.acknowledgement.observedAt.getTime() > acknowledgements.terminalAt.getTime()
+        ) {
+          acknowledgements.terminalAt = input.acknowledgement.observedAt;
+        }
+      } else if (
+        acknowledgements.idleAt === null ||
+        input.acknowledgement.observedAt.getTime() > acknowledgements.idleAt.getTime()
+      ) {
+        acknowledgements.idleAt = input.acknowledgement.observedAt;
+      }
+      executions.set(input.executionId, {
+        ...execution,
+        hubActionAcknowledgements: acknowledgements,
+      });
+      const committed = insertControlOperationRecord({
+        organizationId: input.organizationId,
+        op: "acknowledge",
+        status: "applied",
+        idempotencyKey: input.idempotencyKey,
+        executionId: input.executionId,
+        capability: input.capability,
+        subject: input.subject,
+        correlationId: input.correlationId ?? null,
+        effect: {
+          acknowledgement: {
+            kind: input.acknowledgement.kind,
+            observedAt: input.acknowledgement.observedAt.toISOString(),
+          },
+        },
+      });
+      return Promise.resolve(
+        committed.inserted
+          ? { status: "applied" as const, record: committed.record }
+          : { status: "existing" as const, record: committed.record },
+      );
+    },
+    completeStartControlOperation: (input) => {
+      const existing = opsById.get(input.operationId);
+      if (
+        existing === undefined ||
+        existing.organizationId !== input.organizationId ||
+        existing.op !== "execution_start"
+      ) {
+        return Promise.resolve(undefined);
+      }
+      const updated: ControlOperationRecord = {
+        ...existing,
+        status: "applied",
+        effect: input.effect,
         updatedAt: new Date(),
       };
-      opsByKey.set(key, record);
-      opsById.set(record.id, record);
-      return Promise.resolve({ inserted: true, record });
+      opsById.set(updated.id, updated);
+      opsByKey.set(`${updated.organizationId}:${updated.idempotencyKey}`, updated);
+      return Promise.resolve(updated);
     },
+    insertControlOperation: (input: InsertControlOperationInput) =>
+      Promise.resolve(insertControlOperationRecord(input)),
     findControlOperationById: (organizationId, id) => {
       const record = opsById.get(id);
       if (record === undefined || record.organizationId !== organizationId) {
@@ -269,7 +381,7 @@ function baseCapabilities(): PublicOperationCapabilities {
 }
 
 describe("control operations", () => {
-  it("answers control_plane_unavailable on every op when the ANVIL seam is unconfigured", async () => {
+  it("fails new mutations closed without ANVIL while keeping the Hub ledger readable", async () => {
     const repository = makeRepository();
     const operations = createPublicOperations(repository, baseCapabilities());
     assert.deepEqual(
@@ -317,12 +429,73 @@ describe("control operations", () => {
     );
     assert.deepEqual(
       await operations.getControlOperation(authorization, { operationId: randomUUID() }),
-      { status: "control_plane_unavailable" },
+      { status: "control_operation_not_found" },
     );
     assert.deepEqual(await operations.listControlOperations(authorization, { limit: 10 }), {
-      status: "control_plane_unavailable",
+      status: "listed",
+      operations: [],
     });
     assert.equal(repository.hubActionRequests.length, 0);
+  });
+
+  it("replays stored mutations while the ANVIL authority seam is unavailable", async () => {
+    const repository = makeRepository();
+    const existingCancel = await repository.insertControlOperation({
+      organizationId: ORG,
+      op: "cancel",
+      status: "applied",
+      idempotencyKey: "offline-replay",
+      executionId: EXECUTION_ID,
+      capability: "control.cancel",
+      subject: "machine:test",
+      effect: { previousHubAction: null, executionStatus: "running" },
+    });
+    const existingStart = await repository.insertControlOperation({
+      organizationId: ORG,
+      op: "execution_start",
+      status: "applied",
+      idempotencyKey: "offline-start-replay",
+      executionId: null,
+      capability: "control.execution_start",
+      subject: "machine:test",
+      effect: {
+        requestTarget: {
+          trigger: "manual",
+          projectSlug: "project",
+          expectedVersionId: null,
+        },
+      },
+    });
+    const operations = createPublicOperations(repository, baseCapabilities());
+
+    const cancelReplay = await operations.cancelExecution(authorization, {
+      executionId: EXECUTION_ID,
+      idempotencyKey: "offline-replay",
+    });
+    assert.equal(cancelReplay.status, "replayed");
+    if (cancelReplay.status !== "replayed") throw new Error("unreachable");
+    assert.equal(cancelReplay.operation.operationId, existingCancel.record.id);
+    assert.equal(cancelReplay.operation.replayed, true);
+    assert.equal(repository.hubActionRequests.length, 0);
+
+    const startReplay = await operations.startApprovedExecution(authorization, {
+      idempotencyKey: "offline-start-replay",
+      trigger: "manual",
+      projectSlug: "project",
+    });
+    assert.equal(startReplay.status, "replayed");
+    if (startReplay.status !== "replayed") throw new Error("unreachable");
+    assert.equal(startReplay.operation.operationId, existingStart.record.id);
+    assert.equal(repository.dispatchInputs.length, 0);
+
+    const got = await operations.getControlOperation(authorization, {
+      operationId: existingCancel.record.id,
+    });
+    assert.equal(got.status, "ok");
+    const listed = await operations.listControlOperations(authorization, { limit: 10 });
+    assert.equal(listed.status, "listed");
+    if (listed.status !== "listed") throw new Error("unreachable");
+    assert.equal(listed.operations.length, 2);
   });
 
   it("denies every op when the bound ANVIL subject lacks the durable grant — transport scope is not authority", async () => {
@@ -558,7 +731,7 @@ describe("control operations", () => {
     assert.equal(replay.status, "replayed");
   });
 
-  it("resume and retry record intent on terminal executions and refuse live ones", async () => {
+  it("resume and retry record intent only from failed executions", async () => {
     const repository = makeRepository();
     repository.executions.set(EXECUTION_ID, baseExecution({ status: "running" }));
     const operations = createPublicOperations(repository, {
@@ -570,7 +743,7 @@ describe("control operations", () => {
         executionId: EXECUTION_ID,
         idempotencyKey: "retry-live",
       }),
-      { status: "control_precondition_failed", reason: "execution_still_live" },
+      { status: "control_precondition_failed", reason: "execution_not_failed" },
     );
     repository.executions.set(EXECUTION_ID, baseExecution({ status: "failed" }));
     const retry = await operations.retryExecution(authorization, {
@@ -583,6 +756,22 @@ describe("control operations", () => {
     // Recorded intent does not rematerialize the execution.
     assert.equal(repository.executions.get(EXECUTION_ID)?.status, "failed");
     assert.equal(repository.executions.get(EXECUTION_ID)?.hubAction, null);
+
+    repository.executions.set(EXECUTION_ID, baseExecution({ status: "succeeded" }));
+    assert.deepEqual(
+      await operations.resumeExecution(authorization, {
+        executionId: EXECUTION_ID,
+        idempotencyKey: "resume-succeeded",
+      }),
+      { status: "control_precondition_failed", reason: "execution_not_failed" },
+    );
+    assert.deepEqual(
+      await operations.retryExecution(authorization, {
+        executionId: EXECUTION_ID,
+        idempotencyKey: "retry-succeeded",
+      }),
+      { status: "control_precondition_failed", reason: "execution_not_failed" },
+    );
   });
 
   it("acknowledge applies terminal/idle and rejects the daemon-side kind", async () => {
@@ -615,6 +804,36 @@ describe("control operations", () => {
     );
     // Rejected kinds are never recorded.
     assert.equal(repository.opsById.size, 1);
+  });
+
+  it("conflicts when an acknowledge key is reused for a different attention target", async () => {
+    const repository = makeRepository();
+    repository.executions.set(EXECUTION_ID, baseExecution());
+    const operations = createPublicOperations(repository, {
+      ...baseCapabilities(),
+      roomAuthority: makeAuthority(ALL_CONTROL_CAPABILITIES),
+    });
+
+    const first = await operations.acknowledgeAttention(authorization, {
+      executionId: EXECUTION_ID,
+      attentionKind: "idle",
+      idempotencyKey: "ack-target-key",
+    });
+    assert.equal(first.status, "applied");
+    if (first.status !== "applied") throw new Error("unreachable");
+
+    assert.deepEqual(
+      await operations.acknowledgeAttention(authorization, {
+        executionId: EXECUTION_ID,
+        attentionKind: "terminal",
+        idempotencyKey: "ack-target-key",
+      }),
+      {
+        status: "idempotency_key_conflict",
+        existingOperationId: first.operation.operationId,
+      },
+    );
+    assert.equal(repository.acknowledgementRequests.length, 1);
   });
 
   it("startApprovedExecution fails closed on project, trigger, and dispatch problems", async () => {
@@ -654,7 +873,8 @@ describe("control operations", () => {
       }),
       { status: "control_precondition_failed", reason: "dispatch_conflict" },
     );
-    assert.equal(repository.opsById.size, 0);
+    assert.equal(repository.opsById.size, 1);
+    assert.equal([...repository.opsById.values()][0]?.status, "recorded");
   });
 
   it("startApprovedExecution dispatches with the idempotency-derived delivery key and records the op", async () => {
@@ -688,6 +908,44 @@ describe("control operations", () => {
     assert.equal(effect.providerEventReceiptId, "receipt-1");
     assert.equal(effect.triggerRunId, "run-1");
     assert.equal(effect.configuredTriggerName, "manual");
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(result.operation.effect, "requestTarget"),
+      false,
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(result.operation.effect, "dispatchRequest"),
+      false,
+    );
+    const stored = repository.opsById.get(result.operation.operationId);
+    assert.ok(stored);
+    assert.ok(
+      typeof stored.effect === "object" && stored.effect !== null && !Array.isArray(stored.effect),
+    );
+    assert.ok("requestTarget" in stored.effect);
+    assert.deepEqual(stored.effect["requestTarget"], {
+      trigger: "manual",
+      projectSlug: "project",
+      expectedVersionId: null,
+    });
+    assert.ok("dispatchRequest" in stored.effect);
+    const storedDispatch = z
+      .object({
+        projectId: z.string(),
+        trigger: z.string(),
+        projectSlug: z.string(),
+        expectedVersionId: z.string().nullable(),
+        actor: z.string(),
+        deliveryKey: z.string(),
+        inputPresent: z.boolean(),
+        input: z.unknown(),
+        credentialKind: z.enum(["apiKey", "cliCredential"]),
+        credentialId: z.string(),
+      })
+      .parse(stored.effect["dispatchRequest"]);
+    assert.equal(storedDispatch.projectId, "project-1");
+    assert.equal(storedDispatch.deliveryKey, "control-start-key");
+    assert.equal(storedDispatch.inputPresent, true);
+    assert.deepEqual(storedDispatch.input, { reason: "approved" });
     const dispatch = z
       .object({ payload: z.object({ publicDeliveryKey: z.string() }) })
       .parse(repository.dispatchInputs[0]);
@@ -700,6 +958,199 @@ describe("control operations", () => {
     });
     assert.equal(replayed.status, "replayed");
     assert.equal(repository.dispatchInputs.length, 1);
+
+    const changedTarget = await operations.startApprovedExecution(authorization, {
+      idempotencyKey: "start-key",
+      trigger: "other-manual",
+      projectSlug: "other-project",
+    });
+    assert.deepEqual(changedTarget, {
+      status: "idempotency_key_conflict",
+      existingOperationId: result.operation.operationId,
+    });
+    assert.equal(repository.dispatchInputs.length, 1);
+  });
+
+  it("recovers a durable approved-start claim after dispatch committed but finalization failed", async () => {
+    const repository = makeRepository();
+    repository.projects.set(`${ORG}:manual:project`, { id: "project-1", disabled: false });
+    const durableFinalize = repository.completeStartControlOperation.bind(repository);
+    let failFinalizeOnce = true;
+    repository.completeStartControlOperation = async (input) => {
+      if (failFinalizeOnce) {
+        failFinalizeOnce = false;
+        throw new Error("injected start finalization failure");
+      }
+      return durableFinalize(input);
+    };
+    const dispatchManualEvent = (
+      input: Parameters<PublicOperationCapabilities["dispatchManualEvent"]>[0],
+    ) => {
+      repository.dispatchInputs.push(input);
+      return Promise.resolve({ providerEventReceiptId: "receipt-1" });
+    };
+    const first = createPublicOperations(repository, {
+      ...baseCapabilities(),
+      dispatchManualEvent,
+      roomAuthority: makeAuthority(ALL_CONTROL_CAPABILITIES),
+    });
+
+    await assert.rejects(
+      () =>
+        first.startApprovedExecution(authorization, {
+          idempotencyKey: "start-crash-window",
+          trigger: "manual",
+          projectSlug: "project",
+          actor: "approved-actor",
+          input: { reason: "first" },
+        }),
+      /injected start finalization failure/u,
+    );
+    assert.equal(repository.opsById.size, 1);
+    const pending = [...repository.opsById.values()][0];
+    assert.equal(pending?.status, "recorded");
+
+    // A fresh operations surface can resume the crash-recovery claim only
+    // while the current bound subject still holds execution-start authority.
+    const recoveredSurface = createPublicOperations(repository, {
+      ...baseCapabilities(),
+      dispatchManualEvent,
+      roomAuthority: makeAuthority(ALL_CONTROL_CAPABILITIES),
+    });
+    const recovered = await recoveredSurface.startApprovedExecution(authorization, {
+      idempotencyKey: "start-crash-window",
+      trigger: "manual",
+      projectSlug: "project",
+      actor: "changed-actor",
+      input: { reason: "second" },
+    });
+    assert.equal(recovered.status, "replayed");
+    if (recovered.status !== "replayed") throw new Error("unreachable");
+    assert.equal(recovered.operation.status, "applied");
+    assert.equal(repository.opsById.size, 1);
+    assert.equal(repository.dispatchInputs.length, 2);
+
+    const dispatches = repository.dispatchInputs.map(
+      (raw) =>
+        z
+          .object({
+            payload: z.object({
+              publicDeliveryKey: z.string(),
+              actor: z.string(),
+              input: z.unknown(),
+            }),
+          })
+          .parse(raw).payload,
+    );
+    assert.deepEqual(dispatches, [
+      {
+        publicDeliveryKey: "control-start-crash-window",
+        actor: "approved-actor",
+        input: { reason: "first" },
+      },
+      {
+        publicDeliveryKey: "control-start-crash-window",
+        actor: "approved-actor",
+        input: { reason: "first" },
+      },
+    ]);
+  });
+
+  it("does not treat an incomplete start claim as durable authority after revocation", async () => {
+    const repository = makeRepository();
+    repository.projects.set(`${ORG}:manual:project`, { id: "project-1", disabled: false });
+    const claimed = await repository.insertControlOperation({
+      organizationId: ORG,
+      op: "execution_start",
+      status: "recorded",
+      idempotencyKey: "start-revoked-before-recovery",
+      executionId: null,
+      capability: "control.execution_start",
+      subject: "machine:test",
+      effect: {
+        requestTarget: {
+          trigger: "manual",
+          projectSlug: "project",
+          expectedVersionId: null,
+        },
+        dispatchRequest: {
+          projectId: "project-1",
+          projectSlug: "project",
+          trigger: "manual",
+          expectedVersionId: null,
+          actor: "approved-actor",
+          deliveryKey: "control-start-revoked-before-recovery",
+          inputPresent: false,
+          input: null,
+          credentialKind: "apiKey",
+          credentialId: authorization.credentialId,
+        },
+      },
+    });
+    assert.equal(claimed.inserted, true);
+
+    const operations = createPublicOperations(repository, {
+      ...baseCapabilities(),
+      roomAuthority: makeAuthority(new Set()),
+    });
+    const recovered = await operations.startApprovedExecution(authorization, {
+      idempotencyKey: "start-revoked-before-recovery",
+      trigger: "manual",
+      projectSlug: "project",
+    });
+
+    assert.deepEqual(recovered, {
+      status: "control_capability_denied",
+      capability: "control.execution_start",
+    });
+    assert.equal(repository.dispatchInputs.length, 0);
+    assert.equal(repository.opsById.get(claimed.record.id)?.status, "recorded");
+  });
+
+  it("claims the start idempotency key before dispatch so a different op cannot create an effect", async () => {
+    const repository = makeRepository();
+    repository.projects.set(`${ORG}:manual:project`, { id: "project-1", disabled: false });
+    repository.executions.set(EXECUTION_ID, baseExecution());
+
+    let releaseDispatch: (() => void) | undefined;
+    let dispatchEntered: (() => void) | undefined;
+    const entered = new Promise<void>((resolve) => {
+      dispatchEntered = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const operations = createPublicOperations(repository, {
+      ...baseCapabilities(),
+      roomAuthority: makeAuthority(ALL_CONTROL_CAPABILITIES),
+      dispatchManualEvent: async (input) => {
+        repository.dispatchInputs.push(input);
+        dispatchEntered?.();
+        await release;
+        return { providerEventReceiptId: "receipt-1" };
+      },
+    });
+
+    const starting = operations.startApprovedExecution(authorization, {
+      idempotencyKey: "cross-op-race",
+      trigger: "manual",
+      projectSlug: "project",
+    });
+    await entered;
+
+    const cancel = await operations.cancelExecution(authorization, {
+      executionId: EXECUTION_ID,
+      idempotencyKey: "cross-op-race",
+    });
+    assert.equal(cancel.status, "idempotency_key_conflict");
+    assert.equal(repository.hubActionRequests.length, 0);
+    assert.equal(repository.executions.get(EXECUTION_ID)?.hubAction, null);
+
+    releaseDispatch?.();
+    const started = await starting;
+    assert.equal(started.status, "applied");
+    assert.equal(repository.opsById.size, 1);
+    assert.equal([...repository.opsById.values()][0]?.op, "execution_start");
   });
 
   it("rejects invalid inputs before any effect", async () => {

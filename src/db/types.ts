@@ -196,6 +196,42 @@ export interface InsertControlOperationInput {
   response?: unknown;
 }
 
+export interface ApplyCancelControlOperationInput {
+  organizationId: string;
+  executionId: string;
+  idempotencyKey: string;
+  capability: string;
+  subject: string;
+  correlationId?: string | null;
+}
+
+export type ApplyCancelControlOperationResult =
+  | { status: "applied"; record: ControlOperationRecord }
+  | { status: "existing"; record: ControlOperationRecord }
+  | { status: "execution_not_found" }
+  | { status: "precondition_failed" };
+
+export interface ApplyAcknowledgementControlOperationInput {
+  organizationId: string;
+  executionId: string;
+  idempotencyKey: string;
+  capability: string;
+  subject: string;
+  correlationId?: string | null;
+  acknowledgement: Extract<AgentExecutionHubAcknowledgementInput, { kind: "terminal" | "idle" }>;
+}
+
+export type ApplyAcknowledgementControlOperationResult =
+  | { status: "applied"; record: ControlOperationRecord }
+  | { status: "existing"; record: ControlOperationRecord }
+  | { status: "execution_not_found" };
+
+export interface CompleteStartControlOperationInput {
+  organizationId: string;
+  operationId: string;
+  effect: unknown;
+}
+
 export interface ListControlOperationsFilter {
   executionId?: string;
   op?: ControlOp;
@@ -1414,6 +1450,27 @@ export interface Database {
     executionId: string,
     action: HubAction,
   ): Promise<AgentExecutionRecord | undefined>;
+  /**
+   * I4 authority-preserving control commit: the hub-action mutation and its
+   * idempotency receipt commit in one transaction or neither commits.
+   */
+  applyCancelControlOperation(
+    input: ApplyCancelControlOperationInput,
+  ): Promise<ApplyCancelControlOperationResult>;
+  /**
+   * I4 authority-preserving control commit: the acknowledgement mutation and
+   * its idempotency receipt commit in one transaction or neither commits.
+   */
+  applyAcknowledgementControlOperation(
+    input: ApplyAcknowledgementControlOperationInput,
+  ): Promise<ApplyAcknowledgementControlOperationResult>;
+  /**
+   * Finalizes a previously authorized execution_start claim. The claim row
+   * must already own the organization/idempotency key before dispatch begins.
+   */
+  completeStartControlOperation(
+    input: CompleteStartControlOperationInput,
+  ): Promise<ControlOperationRecord | undefined>;
   insertControlOperation(
     input: InsertControlOperationInput,
   ): Promise<{ inserted: boolean; record: ControlOperationRecord }>;
