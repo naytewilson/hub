@@ -893,14 +893,18 @@ describe("control operations", () => {
       false,
     );
     const stored = repository.opsById.get(result.operation.operationId);
-    assert.deepEqual(
-      (stored?.effect as { requestTarget?: unknown } | undefined)?.requestTarget,
-      {
-        trigger: "manual",
-        projectSlug: "project",
-        expectedVersionId: null,
-      },
+    assert.ok(stored);
+    assert.ok(
+      typeof stored.effect === "object" &&
+        stored.effect !== null &&
+        !Array.isArray(stored.effect),
     );
+    assert.ok("requestTarget" in stored.effect);
+    assert.deepEqual(stored.effect["requestTarget"], {
+      trigger: "manual",
+      projectSlug: "project",
+      expectedVersionId: null,
+    });
     const dispatch = z
       .object({ payload: z.object({ publicDeliveryKey: z.string() }) })
       .parse(repository.dispatchInputs[0]);
