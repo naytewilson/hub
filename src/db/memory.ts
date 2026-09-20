@@ -2109,9 +2109,10 @@ class MemoryDatabase implements Database {
     );
   }
 
-  private insertControlOperationRecord(
-    input: InsertControlOperationInput,
-  ): { inserted: boolean; record: ControlOperationRecord } {
+  private insertControlOperationRecord(input: InsertControlOperationInput): {
+    inserted: boolean;
+    record: ControlOperationRecord;
+  } {
     const key = `${input.organizationId}:${input.idempotencyKey}`;
     const existingId = this.controlOperationIdsByKey.get(key);
     if (existingId !== undefined) {
