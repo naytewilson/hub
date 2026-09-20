@@ -68,7 +68,12 @@ jobs:
         run: npm ci
 
       - name: Check formatting
-        run: npm run format:check
+        run: |
+          npx oxfmt --write src/public-operations/control-operations.ts
+          echo "::group::oxfmt exact delta"
+          git diff -- src/public-operations/control-operations.ts
+          echo "::endgroup::"
+          exit 1
 
   test:
     runs-on: ubuntu-latest
