@@ -16,6 +16,7 @@ permissions:
 # is one exact 40-character SHA; mutable refs and repository variables are forbidden.
 env:
   PASEO_E2E_COMMIT: c16d4f14a3ec95485f37aa7fb6201b7c239d9d2a
+  DOCKER_HOST: unix:///run/user/1006/podman/podman.sock
 
 jobs:
   typecheck:
