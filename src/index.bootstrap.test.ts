@@ -3,7 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, it } from "vitest";
-import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
+import {
+  PostgreSqlContainer,
+  type StartedPostgreSqlContainer,
+} from "./test-utils/podman-postgresql.js";
 import { createPostgresQueryRuntime } from "./db/test-utils/runtime.js";
 import { HubHarness } from "./daemons/test-utils/hub-harness.js";
 import { createDatabase, testDatabaseLocks, testDatabaseRuntime } from "./db/test-utils/runtime.js";

@@ -50,7 +50,7 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "db:generate": "drizzle-kit generate",
     "db:check": "scripts/check-drizzle.sh",
-    "docker:smoke": "scripts/docker-smoke.sh"
+    "podman:smoke": "scripts/podman-smoke.sh"
   },
   "dependencies": {
     "@asteasolutions/zod-to-openapi": "^9.1.0",
@@ -98,7 +98,6 @@
     "@modelcontextprotocol/client": "2.0.0",
     "@playwright/test": "1.61.1",
     "@tailwindcss/vite": "4.3.3",
-    "@testcontainers/postgresql": "^11.14.0",
     "@types/chai": "5.0.1",
     "@types/js-yaml": "^4.0.9",
     "@types/jsonwebtoken": "^9.0.9",

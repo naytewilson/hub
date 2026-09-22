@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "vitest";
-import { PostgreSqlContainer } from "@testcontainers/postgresql";
+import { PostgreSqlContainer } from "../test-utils/podman-postgresql.js";
 import { embeddedDatabaseRuntime, postgresDatabaseRuntime } from "../db/runtime/index.js";
 import { createRuntimeConfiguration } from "./index.js";
 

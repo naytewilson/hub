@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PostgreSqlContainer } from "@testcontainers/postgresql";
+import { PostgreSqlContainer } from "../test-utils/podman-postgresql.js";
 import { afterEach, describe, it } from "vitest";
 import {
   embeddedDatabaseRuntime,

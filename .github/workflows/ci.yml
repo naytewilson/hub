@@ -2,8 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
-  pull_request:
+    branches: [main, north/local-ci-cutover-20260921]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -20,13 +19,11 @@ env:
 
 jobs:
   typecheck:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Check Docker build definition
-        run: docker build --check .
-
+      # OCI image validation is owned by the dedicated Podman smoke job.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
@@ -39,7 +36,7 @@ jobs:
         run: npm run typecheck
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -55,7 +52,7 @@ jobs:
         run: npm run lint
 
   format:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -71,23 +68,9 @@ jobs:
         run: npm run format:check
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     env:
       RUN_RUNG_E_E2E: ${{ vars.RUN_RUNG_E_E2E }}
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -107,8 +90,17 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Clean up Podman test databases
+        if: always()
+        shell: bash
+        run: |
+          mapfile -t containers < <(podman ps --all --quiet --filter label=io.paseo.hub.test-postgres=true)
+          if (( ${#containers[@]} > 0 )); then
+            podman stop --time 1 "${containers[@]}" >/dev/null 2>&1 || true
+          fi
+
   migrations:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -120,7 +112,7 @@ jobs:
         run: npm run db:check
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -132,7 +124,7 @@ jobs:
         run: npm run build
 
   browser-e2e:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     env:
       PASEO_E2E_WORKTREE: ${{ github.workspace }}/paseo-source
     steps:
@@ -165,19 +157,21 @@ jobs:
 
       - run: npm ci
       - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
       - name: Run built-app browser tests
-        run: npm run test:e2e:browser
+        run: npm run test:e2e:browser -- --workers=2
 
-  docker-smoke:
-    runs-on: ubuntu-latest
+  podman-smoke:
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Build and smoke-test production image
-        run: npm run docker:smoke
+        run: npm run podman:smoke
 
   hub-e2e:
-    runs-on: ubuntu-latest
+    needs: [test, build]
+    if: ${{ always() }}
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     env:
       PASEO_E2E_WORKTREE: ${{ github.workspace }}/paseo-source
     steps:
@@ -215,7 +209,7 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code@2.1.226 @openai/codex@0.144.0
 
       - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
 
       - name: Build Hub production application
         run: npm run build
