@@ -166,7 +166,7 @@ jobs:
       - name: Install Chromium
         run: npx playwright install chromium
       - name: Run built-app browser tests
-        run: npm run test:e2e:browser
+        run: npm run test:e2e:browser -- --workers=2
 
   docker-smoke:
     runs-on: [self-hosted, Linux, X64, nayte-linux]
