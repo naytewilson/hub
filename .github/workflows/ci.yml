@@ -23,9 +23,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Check Docker build definition
-        run: docker build --check .
-
+      # Container-image validation is owned by the dedicated docker-smoke job.
+      # Podman's Docker-compatible CLI does not implement BuildKit's `build --check`.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
