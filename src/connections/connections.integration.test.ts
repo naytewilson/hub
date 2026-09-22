@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, createHmac, randomUUID } from "node:crypto";
-import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
+import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "../test-utils/podman-postgresql.js";
 import { afterEach, beforeEach, describe, it } from "vitest";
 import type { DatabaseRuntime, QueryHandle } from "../db/runtime/index.js";
 import { createPostgresQueryRuntime } from "../db/test-utils/runtime.js";

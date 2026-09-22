@@ -25,13 +25,7 @@ async function runPodman(args: string[], allowFailure = false): Promise<CommandR
     });
     return { stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
-    if (allowFailure) {
-      const candidate = error as { stdout?: string; stderr?: string };
-      return {
-        stdout: candidate.stdout ?? "",
-        stderr: candidate.stderr ?? "",
-      };
-    }
+    if (allowFailure) return { stdout: "", stderr: "" };
     throw error;
   }
 }
@@ -81,7 +75,7 @@ export class PostgreSqlContainer {
       `POSTGRES_DB=${POSTGRES_DATABASE}`,
       "--publish",
       `127.0.0.1::${POSTGRES_PORT}`,
-      this.image,
+      this.image.includes("/") ? this.image : `docker.io/library/${this.image}`,
     ]);
 
     try {
@@ -129,11 +123,14 @@ export class StartedPostgreSqlContainer {
         await runPodman([
           "exec",
           this.name,
-          "pg_isready",
+          "psql",
+          "--no-psqlrc",
           "--username",
           POSTGRES_USER,
           "--dbname",
           POSTGRES_DATABASE,
+          "--command",
+          "SELECT 1;",
         ]);
         return;
       } catch (error) {
