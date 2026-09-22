@@ -169,6 +169,8 @@ jobs:
         run: npm run podman:smoke
 
   hub-e2e:
+    needs: [test, build]
+    if: ${{ always() }}
     runs-on: [self-hosted, Linux, X64, nayte-linux]
     env:
       PASEO_E2E_WORKTREE: ${{ github.workspace }}/paseo-source
