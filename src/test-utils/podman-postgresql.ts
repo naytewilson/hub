@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
+import { Client } from "pg";
 
 const execFileAsync = promisify(execFile);
 
@@ -119,21 +120,17 @@ export class StartedPostgreSqlContainer {
     let lastError = "";
 
     while (Date.now() < deadline) {
+      const client = new Client({
+        connectionString: this.getConnectionUri(),
+        connectionTimeoutMillis: 1_000,
+      });
       try {
-        await runPodman([
-          "exec",
-          this.name,
-          "psql",
-          "--no-psqlrc",
-          "--username",
-          POSTGRES_USER,
-          "--dbname",
-          POSTGRES_DATABASE,
-          "--command",
-          "SELECT 1;",
-        ]);
+        await client.connect();
+        await client.query("SELECT 1");
+        await client.end();
         return;
       } catch (error) {
+        await client.end().catch(() => undefined);
         lastError = error instanceof Error ? error.message : String(error);
         await sleep(POLL_INTERVAL_MS);
       }
