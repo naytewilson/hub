@@ -2,8 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
-  pull_request:
+    branches: [main, north/local-ci-cutover-20260921]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -20,7 +19,7 @@ env:
 
 jobs:
   typecheck:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -39,7 +38,7 @@ jobs:
         run: npm run typecheck
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -55,7 +54,7 @@ jobs:
         run: npm run lint
 
   format:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -71,7 +70,7 @@ jobs:
         run: npm run format:check
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     env:
       RUN_RUNG_E_E2E: ${{ vars.RUN_RUNG_E_E2E }}
     services:
@@ -108,7 +107,7 @@ jobs:
         run: npm test
 
   migrations:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -120,7 +119,7 @@ jobs:
         run: npm run db:check
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -132,7 +131,7 @@ jobs:
         run: npm run build
 
   browser-e2e:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     env:
       PASEO_E2E_WORKTREE: ${{ github.workspace }}/paseo-source
     steps:
@@ -170,14 +169,14 @@ jobs:
         run: npm run test:e2e:browser
 
   docker-smoke:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Build and smoke-test production image
         run: npm run docker:smoke
 
   hub-e2e:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     env:
       PASEO_E2E_WORKTREE: ${{ github.workspace }}/paseo-source
     steps:
