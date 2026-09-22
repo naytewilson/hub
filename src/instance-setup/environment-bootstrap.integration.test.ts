@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { afterAll, beforeAll, describe, it } from "vitest";
-import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "../test-utils/podman-postgresql.js";
+import {
+  PostgreSqlContainer,
+  type StartedPostgreSqlContainer,
+} from "../test-utils/podman-postgresql.js";
 import { createPostgresQueryRuntime } from "../db/test-utils/runtime.js";
 import { z } from "zod";
 import {

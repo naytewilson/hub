@@ -3,7 +3,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, it } from "vitest";
-import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "../test-utils/podman-postgresql.js";
+import {
+  PostgreSqlContainer,
+  type StartedPostgreSqlContainer,
+} from "../test-utils/podman-postgresql.js";
 import { postgresDatabaseRuntime } from "./runtime/index.js";
 import type { DatabaseRuntime, QueryHandle, QueryRow } from "./runtime/index.js";
 import { createPostgresQueryRuntime } from "./test-utils/runtime.js";
