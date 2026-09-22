@@ -16,7 +16,6 @@ permissions:
 # is one exact 40-character SHA; mutable refs and repository variables are forbidden.
 env:
   PASEO_E2E_COMMIT: c16d4f14a3ec95485f37aa7fb6201b7c239d9d2a
-  DOCKER_HOST: unix:///run/user/1006/podman/podman.sock
 
 jobs:
   typecheck:
@@ -24,8 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      # Container-image validation is owned by the dedicated docker-smoke job.
-      # Podman's Docker-compatible CLI does not implement BuildKit's `build --check`.
+      # OCI image validation is owned by the dedicated Podman smoke job.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
@@ -73,20 +71,6 @@ jobs:
     runs-on: [self-hosted, Linux, X64, nayte-linux]
     env:
       RUN_RUNG_E_E2E: ${{ vars.RUN_RUNG_E_E2E }}
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 55432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -105,6 +89,15 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      - name: Clean up Podman test databases
+        if: always()
+        shell: bash
+        run: |
+          mapfile -t containers < <(podman ps --all --quiet --filter label=io.paseo.hub.test-postgres=true)
+          if (( ${#containers[@]} > 0 )); then
+            podman stop --time 1 "${containers[@]}" >/dev/null 2>&1 || true
+          fi
 
   migrations:
     runs-on: [self-hosted, Linux, X64, nayte-linux]
@@ -168,12 +161,12 @@ jobs:
       - name: Run built-app browser tests
         run: npm run test:e2e:browser -- --workers=2
 
-  docker-smoke:
+  podman-smoke:
     runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Build and smoke-test production image
-        run: npm run docker:smoke
+        run: npm run podman:smoke
 
   hub-e2e:
     runs-on: [self-hosted, Linux, X64, nayte-linux]
