@@ -80,7 +80,7 @@ jobs:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: postgres
         ports:
-          - 5432:5432
+          - 55432:5432
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s
@@ -163,7 +163,7 @@ jobs:
 
       - run: npm ci
       - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
       - name: Run built-app browser tests
         run: npm run test:e2e:browser
 
@@ -213,7 +213,7 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code@2.1.226 @openai/codex@0.144.0
 
       - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
 
       - name: Build Hub production application
         run: npm run build
