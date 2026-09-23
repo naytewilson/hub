@@ -485,6 +485,7 @@ function executionResponse(requestId: string, result: GetExecutionResult): Respo
         state: result.state,
         substate: result.substate,
         last_transition: result.last_transition,
+        correlation: result.correlation,
       });
     case "execution_not_found":
       return problem(

@@ -1,4 +1,9 @@
 import { createHash } from "node:crypto";
+import {
+  buildCorrelationEnvelope,
+  HUB_PROJECTION_PRODUCER,
+  type CorrelationEnvelopeV2,
+} from "../correlation/envelope.js";
 import type { AgentExecutionRecord, Database } from "../db/types.js";
 import type { DaemonEvent } from "../daemons/protocol.js";
 import {
@@ -125,6 +130,14 @@ export interface ExecutionDescription {
     occurred_at: string | null;
     causation_id: string | null;
   } | null;
+  /**
+   * Correlation Envelope V1 (wire `anvil.correlation.v2`), built from the
+   * authority-held values above. `execution_binding_id`/`binding_generation`
+   * are null: Hub holds `binding_id` internally but never the generation, and
+   * the pair travels together or not at all — never inferred. Freshness of
+   * this projection is UNKNOWN; consumers recompute it against live authority.
+   */
+  correlation: CorrelationEnvelopeV2;
 }
 
 export interface ExecutionConvergenceOptions {
@@ -669,6 +682,28 @@ export function createExecutionConvergence(
       const resolved = await options.gateway.resolveExecution(executionId);
       if (resolved === undefined) throw new ExecutionNotBoundError(executionId);
       const tracked = track(resolved);
+      const last = resolved.last_transition;
+      // Authority-held values only, copied verbatim. resolved.binding_id is
+      // deliberately NOT emitted: Hub holds no binding_generation and the
+      // pair travels together or not at all — never inferred, never repaired.
+      const correlation = buildCorrelationEnvelope({
+        correlation_id: resolved.correlation_id,
+        causation_id: last?.causation_id ?? null,
+        execution_id: executionId,
+        binding: null,
+        producer: HUB_PROJECTION_PRODUCER,
+        observed_at: now(),
+        idempotency_key:
+          last === null
+            ? `hub:execution.describe:${executionId}`
+            : `hub:execution.describe:${executionId}:seq:${last.room_seq}`,
+        source_ref:
+          last === null
+            ? `execution_bindings:${executionId}`
+            : `room_events:${resolved.room_id}:${last.room_seq}`,
+        plane_identity: null,
+      });
+      if (correlation === null) throw new Error("correlation envelope build failed");
       return {
         execution_id: executionId,
         room_id: resolved.room_id,
@@ -684,6 +719,7 @@ export function createExecutionConvergence(
                 occurred_at: resolved.last_transition.occurred_at,
                 causation_id: resolved.last_transition.causation_id,
               },
+        correlation,
       };
     },
   };

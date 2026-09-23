@@ -11,6 +11,7 @@ import type { OperationAuthenticator } from "../auth/operation-auth.js";
 import { DatabaseUnavailableError } from "../db/errors.js";
 import type { PublicOperations } from "../public-operations/index.js";
 import type { ControlOperationWire } from "../public-operations/index.js";
+import { buildCorrelationEnvelope } from "../correlation/envelope.js";
 import type { ControlOp } from "../room-projection/index.js";
 import {
   ConfigurationResourcesSchema,
@@ -1009,8 +1010,20 @@ function successfulOperations(): PublicOperations {
       Promise.resolve({ status: "ok", operation: controlOperation("cancel") }),
     listControlOperations: () =>
       Promise.resolve({ status: "listed", operations: [controlOperation("cancel")] }),
-    getExecution: () =>
-      Promise.resolve({
+    getExecution: () => {
+      const correlation = buildCorrelationEnvelope({
+        correlation_id: "f83dc934-02a0-4849-8de7-699110be24ed",
+        causation_id: "paseo:daemon-1:845e9d26-7977-45e1-bc69-d80a7b55a9cc:x",
+        execution_id: "845e9d26-7977-45e1-bc69-d80a7b55a9cc",
+        binding: null,
+        producer: "hub:projection",
+        observed_at: "2026-09-19T11:30:00.000Z",
+        idempotency_key: "hub:execution.describe:845e9d26-7977-45e1-bc69-d80a7b55a9cc:seq:6",
+        source_ref: "room_events:84af3583-23ff-4fcc-9838-ed3262499be2:6",
+        plane_identity: null,
+      });
+      assert.ok(correlation !== null);
+      return Promise.resolve({
         status: "ok",
         execution_id: "845e9d26-7977-45e1-bc69-d80a7b55a9cc",
         room_id: "84af3583-23ff-4fcc-9838-ed3262499be2",
@@ -1023,7 +1036,9 @@ function successfulOperations(): PublicOperations {
           occurred_at: "2026-09-19T11:30:00.000Z",
           causation_id: "paseo:daemon-1:845e9d26-7977-45e1-bc69-d80a7b55a9cc:x",
         },
-      }),
+        correlation,
+      });
+    },
     mintExecutionGrant: () =>
       Promise.resolve({
         status: "minted",
@@ -1050,6 +1065,20 @@ function successfulOperations(): PublicOperations {
 }
 
 function controlOperation(op: ControlOp): ControlOperationWire {
+  const correlation = buildCorrelationEnvelope({
+    correlation_id: null,
+    execution_id: null,
+    binding: null,
+    producer: "hub:control",
+    observed_at: "2026-09-15T00:00:00.000Z",
+    idempotency_key: "test-key-1",
+    source_ref: "control_operations:b4d5f9d7-2b2e-4f6a-9d2c-0f1e2d3c4b5a",
+    plane_identity: {
+      control_operation_id: "b4d5f9d7-2b2e-4f6a-9d2c-0f1e2d3c4b5a",
+      hub_execution_id: "845e9d26-7977-45e1-bc69-d80a7b55a9cc",
+    },
+  });
+  assert.ok(correlation !== null);
   return {
     operationId: "b4d5f9d7-2b2e-4f6a-9d2c-0f1e2d3c4b5a",
     op,
@@ -1062,6 +1091,7 @@ function controlOperation(op: ControlOp): ControlOperationWire {
     effect: {},
     createdAt: "2026-09-15T00:00:00.000Z",
     updatedAt: "2026-09-15T00:00:00.000Z",
+    correlation,
   };
 }
 

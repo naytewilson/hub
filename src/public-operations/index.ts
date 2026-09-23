@@ -554,7 +554,10 @@ export function createPublicOperations(
           ...(input.status === undefined ? {} : { status: input.status }),
           limit: input.limit ?? 50,
         });
-        return { status: "listed", operations: records.map(toControlOperationWire) };
+        return {
+          status: "listed",
+          operations: records.map((record) => toControlOperationWire(record)),
+        };
       } catch (error) {
         return storageUnavailableOrThrow(error);
       }

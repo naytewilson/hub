@@ -1,5 +1,10 @@
 import type { ApiKeyScope } from "../auth/api-key-contract.js";
 import type { HubBundleFile } from "../config/bundle.js";
+import {
+  buildCorrelationEnvelope,
+  HUB_CONTROL_PRODUCER,
+  type CorrelationEnvelopeV2,
+} from "../correlation/envelope.js";
 import type {
   AgentExecutionHubAcknowledgementInput,
   AgentExecutionRecord,
@@ -283,6 +288,7 @@ export type GetExecutionResult =
         occurred_at: string | null;
         causation_id: string | null;
       } | null;
+      correlation: CorrelationEnvelopeV2;
     }
   | { status: "execution_not_found" }
   | { status: "capability_denied" }
@@ -553,6 +559,15 @@ export interface ControlOperationWire {
   effect: unknown;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Correlation Envelope V1 (wire `anvil.correlation.v2`). Additive.
+   * NAMESPACE SPLIT: `executionId` above is the Hub `agent_executions`
+   * durable id; the envelope's `execution_id` is ANVIL's
+   * `execution_bindings.execution_id` ONLY and stays null here — the two
+   * namespaces are never mapped. The Hub-native id travels as
+   * `plane_identity.hub_execution_id`.
+   */
+  correlation: CorrelationEnvelopeV2;
 }
 
 function isUnknownRecord(value: unknown): value is Record<string, unknown> {
@@ -568,7 +583,34 @@ function controlOperationEffectForWire(record: ControlOperationRecord): unknown 
   return publicEffect;
 }
 
-export function toControlOperationWire(record: ControlOperationRecord): ControlOperationWire {
+export function toControlOperationWire(
+  record: ControlOperationRecord,
+  observedAt: Date = new Date(),
+): ControlOperationWire {
+  // The envelope carries the I1 correlationId passthrough (shape-checked:
+  // malformed values drop to null, never repaired) plus plane-native ids.
+  // execution_id stays null: record.executionId is the Hub agent_executions
+  // durable id — a different namespace from ANVIL's execution_bindings id —
+  // and Hub never maps the two. binding pair stays null: Hub holds no
+  // binding_generation; the pair travels together or not at all.
+  // observed_at is the RESPONSE EMISSION time (the moment this wire object
+  // is produced), never the stored record.createdAt — freshness is
+  // consumer-computed from emission, and a replayed record must not carry
+  // a stale timestamp. observedAt is injectable for deterministic tests.
+  const correlation = buildCorrelationEnvelope({
+    correlation_id: record.correlationId,
+    execution_id: null,
+    binding: null,
+    producer: HUB_CONTROL_PRODUCER,
+    observed_at: observedAt,
+    idempotency_key: record.idempotencyKey,
+    source_ref: `control_operations:${record.id}`,
+    plane_identity: {
+      control_operation_id: record.id,
+      hub_execution_id: record.executionId,
+    },
+  });
+  if (correlation === null) throw new Error("correlation envelope build failed");
   return {
     operationId: record.id,
     op: record.op,
@@ -581,6 +623,7 @@ export function toControlOperationWire(record: ControlOperationRecord): ControlO
     effect: controlOperationEffectForWire(record),
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
+    correlation,
   };
 }
 

@@ -10,6 +10,7 @@ import {
   MAX_PROMPT_PARTIAL_COUNT,
   MAX_PROMPT_PARTIAL_PATH_LENGTH,
 } from "../config/prompt-partials.js";
+import { CorrelationEnvelopeV2Schema } from "../correlation/envelope.js";
 
 extendZodWithOpenApi(z);
 
@@ -502,6 +503,10 @@ export const ControlOperationSchema = z
     effect: z.unknown(),
     createdAt: z.string().datetime({ offset: true }),
     updatedAt: z.string().datetime({ offset: true }),
+    correlation: CorrelationEnvelopeV2Schema.openapi({
+      description:
+        "Correlation Envelope V1 (wire anvil.correlation.v2). Additive: carries the I1 correlationId plus plane-native ids (control_operation_id, hub_execution_id). NOTE the namespace split: executionId above is the Hub agent_executions durable id; the envelope's execution_id is ANVIL's execution_bindings.execution_id only and stays null here — Hub never maps the two namespaces.",
+    }),
   })
   .strict()
   .openapi("ControlOperation", {
@@ -742,6 +747,10 @@ export const ExecutionDescriptionSchema = z
       })
       .strict()
       .nullable(),
+    correlation: CorrelationEnvelopeV2Schema.openapi({
+      description:
+        "Correlation Envelope V1 (wire anvil.correlation.v2), built from authority-held values (correlation_id, execution_id = ANVIL execution_bindings.execution_id, causation_id). execution_binding_id/binding_generation are null: Hub holds no generation and the pair travels together or not at all — never inferred. Freshness UNKNOWN; consumers recompute against live authority.",
+    }),
   })
   .strict()
   .openapi("ExecutionDescription");
